@@ -26,221 +26,381 @@
   <body>
     <div id="app"></div>
     <script>
-      const ORDER = {
-        items: [
-          {
-            label: "아메리카노",
-            value: 3000,
-            // imageUrl: "https://example.com/image.jpg", // Optional
-            options: [
-              {
-                type: "option",
-                label: "ICE",
-                value: 0,
-              },
-              {
-                type: "option",
-                label: "샷추가",
-                value: 500,
-              },
-              {
-                type: "discount",
-                label: "이벤트",
-                value: 100,
-              },
-            ],
-          },
-          {
-            label: "카페라떼",
-            quantity: 2,
-            value: 6000,
-          },
-        ],
-        // discounts는 최대 3개 까지 렌더됩니다.
-        discounts: [
-          {
-            label: "전체할인 10%",
-            value: 940,
-          },
-        ],
-        summary: {
-          totalAmount: 15400,
-          discountAmount: 1040,
-          earned: {
-            label: "매장 포인트 적립",
-            value: 100,
-            suffix: "P",
-          },
-        },
-      };
+      // payment.html — terminal page for two flows dispatched by home.html
+      // (spec §6.2 doPayment, §4.2/§4.3 cancel/refund). Reads the dispatch
+      // payload stashed in sessionStorage, opens its own WS B, then either
+      // calls sdk.payment.requestPayment (payment) or
+      // sdk.payment.requestPaymentCancel (refund) and reports the result.
+      //
+      // No pending-payment recovery on this page — recovery runs on home.html
+      // (spec §5). Skipping it here avoids a race where a stale recovery
+      // overwrites the new pending-payment storage we're about to write.
 
-      /**
-       * 결제 결과를 서버에 업로드
-       */
-      const uploadPaymentResult = async (paymentKey, paymentResponse) => {
-        const { value: token } = await sdk.storage.get({ key: "token" });
+      // Helper: spec §6.2 mapTossFailureToKorean.
+      function mapTossFailureToKorean(result) {
+        if (result.type === "TIMEOUT") return "시간 초과";
+        if (result.type === "CANCELED") return "승인 거절";
+        // TODO(verify-error-shape): Toss failure-code → Korean mapping is
+        // GAP per spec §6.2 — extend after real-device verification.
+        return "통신 오류";
+      }
 
-        const response = await fetch("https://example.com/api/payments", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
+      // Helper: spec §6.2 mapPaymentMethodToKorean.
+      function mapPaymentMethodToKorean(result) {
+        const m = result.response && result.response.paymentMethod;
+        if (m === "CARD") return "카드";
+        if (m === "BARCODE") return "QR/바코드";
+        if (m === "CASH") return "현금";
+        return "—";
+      }
+
+      // Send a JSON message over WS B, gated by readyState. Spec §4.3.
+      function sendWs(ws, message) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(message));
+        }
+      }
+
+      function closeWs(ws) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.close();
+        }
+      }
+
+      // ── PAYMENT FLOW ────────────────────────────────────────────────
+      // Spec §6.2. dispatch.kind === "payment".
+      async function runPayment(ws, dispatch) {
+        // 1. pointUse from order.html. Falsy/NaN → 0.
+        const pointUse =
+          Number(sessionStorage.getItem("smartdoctor.dispatch.pointUse")) || 0;
+
+        // 2. Charged amounts. Spec §6.2: tax = floor(charged / 11),
+        //    supplyValue = charged − tax. NOT charged * 0.1, NOT round.
+        const treatmentTotal =
+          dispatch.amount.supplyValue + dispatch.amount.tax;
+        const charged = treatmentTotal - pointUse;
+        const tax = Math.floor(charged / 11);
+        const supplyValue = charged - tax;
+
+        // 3. session.chargeContext BEFORE requestPayment so backend can
+        //    recover even if the plugin reloads mid-Toss-UI. Spec §4.3.
+        sendWs(ws, {
+          type: "session.chargeContext",
+          payload: {
+            sessionId: dispatch.sessionId,
+            pointUseAmount: pointUse,
+            chargedSupplyValue: supplyValue,
+            chargedTax: tax,
           },
-          body: JSON.stringify({
-            paymentKey,
-            approvalNumber: paymentResponse.approvalNumber,
-            timestamp: paymentResponse.timestamp,
-            paymentMethod: paymentResponse.paymentMethod,
-            amount: paymentResponse.amount,
-            installment: paymentResponse.installment,
+        });
+
+        // 4. Persist pendingPayment BEFORE requestPayment. paymentKey ===
+        //    sessionId per spec §4.2. Used by home.html's recovery helper
+        //    if this page crashes.
+        await sdk.storage.set({
+          key: window.smartdoctor.PENDING_KEY,
+          value: JSON.stringify({
+            sessionId: dispatch.sessionId,
+            paymentKey: dispatch.sessionId,
+            pointUseAmount: pointUse,
+            chargedSupplyValue: supplyValue,
+            chargedTax: tax,
           }),
         });
 
-        if (!response.ok) {
-          throw new Error("결제 결과 서버 저장 실패");
-        }
-      };
+        // 5. Request payment. Spec §2.1 / §7: cash excluded literally.
+        //    The SDK returns {type: "SUCCESS"|"CANCELED"|"TIMEOUT"} — failure
+        //    is a value, not a throw, so no try/catch needed for branching.
+        const result = await sdk.payment.requestPayment({
+          paymentKey: dispatch.sessionId,
+          tax,
+          supplyValue,
+          tip: dispatch.amount.tip,
+          timeoutMs: dispatch.timeoutMs ?? 60000,
+          localeCode: "ko",
+          excludePaymentTypes: ["CASH"],
+        });
 
-      /**
-       * 이미 결제된 건인지 확인
-       */
-      const isAlreadyPaid = async (paymentKey) => {
-        const existingPayment =
-          await sdk.payment.getPaymentByKey(paymentKey);
-        return !!existingPayment;
-      };
+        // 6. Remove pendingPayment AFTER requestPayment resolves — we now
+        //    have the live result and can post it directly.
+        await sdk.storage.remove({ key: window.smartdoctor.PENDING_KEY });
 
-      /**
-       * 결제 성공 처리
-       */
-      const onPaymentSuccess = async (paymentKey, paymentResponse) => {
-        await uploadPaymentResult(paymentKey, paymentResponse);
-        sdk.payment.resetBackupPaymentKey();
-        console.log("결제 성공:", paymentResponse);
-      };
-
-      const onPaymentFailure = (failureType) => {
-        sdk.payment.resetBackupPaymentKey();
-        console.error("결제 실패:", failureType);
-      };
-
-      const onPaymentError = (error) => {
-        sdk.payment.resetBackupPaymentKey();
-        console.error("결제 오류:", error);
-      };
-
-      /**
-       * 앱 시작 시 미완료 결제 복구
-       * 결제 중 페이지 이탈로 응답을 받지 못한 경우를 처리합니다.
-       */
-      const recoverPendingPayment = async () => {
-        const pendingPaymentKey = sdk.payment.getBackupPaymentKey();
-        if (!pendingPaymentKey) {
-          return;
-        }
-
-        const paymentResult =
-          await sdk.payment.getPaymentByKey(pendingPaymentKey);
-        if (paymentResult) {
-          console.log(
-            "미완료 결제 발견, 서버로 업로드:",
-            pendingPaymentKey
-          );
-          await uploadPaymentResult(pendingPaymentKey, paymentResult);
-        }
-
-        sdk.payment.resetBackupPaymentKey();
-      };
-
-      /**
-       * 결제 처리 메인 함수
-       */
-      const processPayment = async (order) => {
-        const price = order.summary.totalAmount;
-        const tax = Math.floor(price / 11);
-        const supplyValue = price - tax;
-        const paymentKey = crypto.randomUUID();
-
-        if (await isAlreadyPaid(paymentKey)) {
-          console.log("이미 결제된 paymentKey입니다:", paymentKey);
-          return;
-        }
-
-        try {
-          const result = await sdk.payment.requestPayment({
-            paymentKey,
-            tax,
-            supplyValue,
-            tip: 0,
-            timeoutMs: 60000,
-          });
-
-          if (result.type === "SUCCESS") {
-            await onPaymentSuccess(paymentKey, result.response);
-          } else {
-            await onPaymentFailure(result.type);
-          }
-        } catch (error) {
-          onPaymentError(error);
-          throw error;
-        }
-      };
-
-      let timerId = null;
-      const intervalMs = 1000;
-
-      /**
-       * 서버로부터 결제 요청을 수신 (Polling 방식)
-       */
-      const fetchPayment = async () => {
-        const { value: token } = await sdk.storage.get({ key: "token" });
-
-        const response = await fetch("https://example.com", {
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-        })
-          .then((response) => response.json())
-          .catch(() => ORDER);
-
-        return response;
-      };
-
-      const handlePayment = async () => {
-        const order = await fetchPayment();
-
-        if (order == null) {
-          return null;
-        }
-
-        clearInterval(timerId);
-        renderOrderPage(order);
-      };
-
-      const renderOrderPage = (order) => {
-        sdk.template.renderOrderPage({
-          order,
-          onClick: async () => {
-            await processPayment(order);
-            onIdle();
-          },
-          onBack: () => {
-            onIdle();
+        // 7. session.result on the live path (no `late: true`). Spec §4.3.
+        sendWs(ws, {
+          type: "session.result",
+          payload: {
+            sessionId: dispatch.sessionId,
+            pointUseAmount: pointUse,
+            chargedSupplyValue: supplyValue,
+            chargedTax: tax,
+            tossResponse: result,
           },
         });
-      };
 
-      const onIdle = () => {
-        sdk.template.renderIdlePage();
-        clearInterval(timerId);
-        timerId = setInterval(handlePayment, intervalMs);
-      };
+        // 8. sessionStorage hygiene — dispatch + pointUse have been consumed.
+        sessionStorage.removeItem("smartdoctor.dispatch");
+        sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
 
-      (async () => {
-        await recoverPendingPayment();
-        onIdle();
-      })();
+        // 9. Render terminal screen.
+        if (result.type === "SUCCESS") {
+          // Spec §6.2 / PDF p.13: renderResultPage with image+success.
+          const { name: hospitalName } = await sdk.app.getMerchant();
+          closeWs(ws);
+          sdk.template.renderResultPage({
+            type: "image",
+            status: "success",
+            title: "수납 완료",
+            description: `${hospitalName}에\n 방문해주셔서 감사합니다`,
+            timerMs: 5000,
+            onTimeout: () => sdk.app.setIdle(),
+            buttons: [
+              {
+                label: "확인",
+                onClick: () => sdk.app.setIdle(),
+                closeOnClick: true,
+              },
+            ],
+            localeCode: "ko",
+          });
+        } else {
+          // Spec §6.2 / PDF p.12: renderOrderResultPage cancelled.
+          // Retry button re-enters runPayment with the same dispatch +
+          // (closure) pointUse — re-enters spec §6.2 p.11.
+          closeWs(ws);
+          sdk.template.renderOrderResultPage({
+            type: "cancelled",
+            order: {
+              items: dispatch.orderSnapshot.items,
+              summary: {
+                totalAmount: treatmentTotal,
+                items: [
+                  {
+                    label: "진료 금액",
+                    value: `${treatmentTotal.toLocaleString()}원`,
+                    theme: "blue",
+                  },
+                  ...(pointUse > 0
+                    ? [
+                        {
+                          label: "메디캐시 사용",
+                          value: `-${pointUse.toLocaleString()}원`,
+                          theme: "blue",
+                        },
+                      ]
+                    : []),
+                  {
+                    label: "취소 사유",
+                    value: mapTossFailureToKorean(result),
+                    theme: "red",
+                  },
+                  {
+                    label: "결제 수단",
+                    value: mapPaymentMethodToKorean(result),
+                    theme: "blue",
+                  },
+                  {
+                    label: "결제 취소",
+                    value: `${charged.toLocaleString()}원`,
+                    theme: "red",
+                  },
+                ],
+              },
+            },
+            cta: {
+              text: "다시 결제하기",
+              // Re-enter the live path. The original dispatch + the
+              // sessionStorage-stashed pointUse — wait, we removed it in
+              // step 8. Re-stash before retry so step 1 reads it again.
+              onClick: () => {
+                sessionStorage.setItem(
+                  "smartdoctor.dispatch",
+                  JSON.stringify(dispatch),
+                );
+                sessionStorage.setItem(
+                  "smartdoctor.dispatch.pointUse",
+                  String(pointUse),
+                );
+                // Open a fresh WS for the retry — the prior one is closed.
+                runFreshFlow();
+              },
+            },
+          });
+        }
+      }
+
+      // ── CANCEL / REFUND FLOW ────────────────────────────────────────
+      // Spec §4.3 refund.result. dispatch.kind === "cancel".
+      async function runCancel(ws, dispatch) {
+        // 1. Pass cancelParams through as-is — backend constructed it.
+        const result = await sdk.payment.requestPaymentCancel(
+          dispatch.cancelParams,
+        );
+
+        // 2. refund.result over WS. Spec §4.3.
+        sendWs(ws, {
+          type: "refund.result",
+          payload: {
+            refundId: dispatch.refundId,
+            tossResponse: result,
+          },
+        });
+
+        // 3. Hygiene: clear dispatch (no pointUse on the cancel branch).
+        sessionStorage.removeItem("smartdoctor.dispatch");
+
+        // 4. Render result.
+        if (result.type === "SUCCESS") {
+          const { name: hospitalName } = await sdk.app.getMerchant();
+          closeWs(ws);
+          sdk.template.renderResultPage({
+            type: "image",
+            status: "success",
+            title: "환불 완료",
+            description: `${hospitalName}에\n 방문해주셔서 감사합니다`,
+            timerMs: 5000,
+            onTimeout: () => sdk.app.setIdle(),
+            buttons: [
+              {
+                label: "확인",
+                onClick: () => sdk.app.setIdle(),
+                closeOnClick: true,
+              },
+            ],
+            localeCode: "ko",
+          });
+        } else {
+          // Failure path: cancel-specific labels, no retry CTA — refund
+          // retry is backend-driven per spec.
+          const refundAmount =
+            (dispatch.cancelParams?.supplyValue ?? 0) +
+            (dispatch.cancelParams?.tax ?? 0);
+          closeWs(ws);
+          sdk.template.renderOrderResultPage({
+            type: "cancelled",
+            order: {
+              // No order snapshot on the refund branch; show an empty list.
+              items: [],
+              summary: {
+                totalAmount: refundAmount,
+                items: [
+                  {
+                    label: "환불 사유",
+                    value: mapTossFailureToKorean(result),
+                    theme: "red",
+                  },
+                  {
+                    label: "결제 수단",
+                    value: mapPaymentMethodToKorean(result),
+                    theme: "blue",
+                  },
+                  {
+                    label: "환불 금액",
+                    value: `${refundAmount.toLocaleString()}원`,
+                    theme: "red",
+                  },
+                ],
+              },
+            },
+            cta: {
+              text: "확인",
+              onClick: () => sdk.app.setIdle(),
+            },
+          });
+        }
+      }
+
+      // ── BOOT ────────────────────────────────────────────────────────
+      // Reads hash + dispatch payload, opens WS, dispatches to runPayment
+      // or runCancel. The `runFreshFlow` indirection lets the failure-path
+      // retry button re-run boot for a fresh WS.
+      async function runFreshFlow() {
+        // 1. Hash id.
+        const hashId = location.hash.slice(1);
+
+        // 2. Dispatch payload — stashed by home.html on session.dispatch.
+        const dispatchJson = sessionStorage.getItem("smartdoctor.dispatch");
+        const dispatch = dispatchJson ? JSON.parse(dispatchJson) : null;
+        if (!dispatch) {
+          sdk.app.setIdle();
+          return;
+        }
+
+        // 3. Token defensive read.
+        const { value: token } = await sdk.storage.get({
+          key: "smartdoctor.token",
+        });
+        if (token == null) {
+          location.href = "./onboarding.html";
+          return;
+        }
+
+        // 4. Open WS B. Wait for onopen before dispatching.
+        const ws = new WebSocket(
+          window.smartdoctor.backendWsUrl(
+            "/plugin?token=" + encodeURIComponent(token),
+          ),
+        );
+
+        // 5. Minimal inbound handler — payment.html is mid-flow, not the
+        //    dispatcher. session.abort defense-in-depth per spec §8.
+        ws.onmessage = (ev) => {
+          let msg;
+          try {
+            msg = JSON.parse(ev.data);
+          } catch (e) {
+            console.warn("[smartdoctor] payment.html ws parse failed", e);
+            return;
+          }
+          switch (msg.type) {
+            case "session.abort":
+              // Per spec §8 backend should NOT send this once we're in
+              // IN_PROGRESS — log and continue.
+              console.warn(
+                "[smartdoctor] payment.html unexpected session.abort",
+                msg.payload,
+              );
+              return;
+            case "error":
+              console.warn("[smartdoctor] payment.html backend error", msg.payload);
+              return;
+            default:
+              console.log("[smartdoctor] payment.html ws message", msg.type);
+              return;
+          }
+        };
+
+        ws.onerror = (ev) => {
+          console.warn("[smartdoctor] payment.html ws error", ev);
+        };
+
+        ws.onclose = (ev) => {
+          console.log(
+            "[smartdoctor] payment.html ws closed",
+            "code=" + ev.code,
+            "reason=" + ev.reason,
+          );
+        };
+
+        ws.onopen = async () => {
+          // 6. Dispatch by kind + hash match.
+          if (dispatch.kind === "payment" && dispatch.sessionId === hashId) {
+            await runPayment(ws, dispatch);
+          } else if (
+            dispatch.kind === "cancel" &&
+            dispatch.refundId === hashId
+          ) {
+            await runCancel(ws, dispatch);
+          } else {
+            closeWs(ws);
+            sdk.app.setIdle();
+          }
+        };
+      }
+
+      runFreshFlow().catch((err) => {
+        console.error("[smartdoctor] payment.html fatal", err);
+        sdk.app.setIdle();
+      });
     </script>
   </body>
 </html>
