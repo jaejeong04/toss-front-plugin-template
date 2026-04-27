@@ -5,12 +5,12 @@ window.smartdoctor.config = {
   BACKEND_HOST: "TODO",
 };
 
-window.smartdoctor.runPendingPaymentRecovery = async function ({ ws } = {}) {
-  const PENDING_KEY = "smartdoctor.pendingPayment";
+window.smartdoctor.PENDING_KEY = "smartdoctor.pendingPayment";
 
+window.smartdoctor.runPendingPaymentRecovery = async function ({ ws } = {}) {
   let pendingJson;
   try {
-    const res = await sdk.storage.get({ key: PENDING_KEY });
+    const res = await sdk.storage.get({ key: window.smartdoctor.PENDING_KEY });
     pendingJson = res && res.value;
   } catch (e) {
     console.warn("[smartdoctor] pending payment storage read failed", e);
@@ -26,6 +26,16 @@ window.smartdoctor.runPendingPaymentRecovery = async function ({ ws } = {}) {
     pending = JSON.parse(pendingJson);
   } catch (e) {
     console.warn("[smartdoctor] pending payment JSON parse failed", e);
+    return;
+  }
+
+  if (!pending || !pending.paymentKey) {
+    // Corrupt or partial pending entry — clean it up so we don't retry forever.
+    try {
+      await sdk.storage.remove({ key: window.smartdoctor.PENDING_KEY });
+    } catch (e) {
+      console.warn("[smartdoctor] pending payment remove failed", e);
+    }
     return;
   }
 
@@ -48,15 +58,16 @@ window.smartdoctor.runPendingPaymentRecovery = async function ({ ws } = {}) {
           },
         }),
       );
-      await sdk.storage.remove({ key: PENDING_KEY });
+      await sdk.storage.remove({ key: window.smartdoctor.PENDING_KEY });
     }
     // No ws (or ws not open): keep storage so a later page with a live WS
     // can finish posting session.result. Spec §5.
   } catch (e) {
+    // TODO(verify-error-shape): SDK error shape isn't publicly documented — verify on real device.
     if (e && e.code === "PAYMENT_NOT_FOUND") {
       // nothing to recover — user aborted or device never approved (spec §5)
       try {
-        await sdk.storage.remove({ key: PENDING_KEY });
+        await sdk.storage.remove({ key: window.smartdoctor.PENDING_KEY });
       } catch (removeErr) {
         console.warn("[smartdoctor] pending payment remove failed", removeErr);
       }
