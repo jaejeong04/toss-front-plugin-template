@@ -26,117 +26,184 @@
   <body>
     <div id="app"></div>
     <script>
-      const ORDER = {
-        items: [
-          {
-            label: "아메리카노",
-            value: 3000,
-            // imageUrl: "https://example.com/image.jpg", // Optional
-            options: [
-              {
-                type: "option",
-                label: "ICE",
-                value: 0,
-              },
-              {
-                type: "option",
-                label: "샷추가",
-                value: 500,
-              },
-              {
-                type: "discount",
-                label: "이벤트",
-                value: 100,
-              },
-            ],
-          },
-          {
-            label: "카페라떼",
-            quantity: 2,
-            value: 6000,
-          },
-        ],
-        // discounts는 최대 3개 까지 렌더됩니다.
-        discounts: [
-          {
-            label: "전체할인 10%",
-            value: 940,
-          },
-        ],
-        summary: {
-          totalAmount: 15400,
-          discountAmount: 1040,
-          earned: {
-            label: "매장 포인트 적립",
-            value: 100,
-            suffix: "P",
-          },
-        },
-      };
+      // order.html — payment-path use-point + order-confirm. Spec §6.2.
+      // Reads the dispatch payload stashed by home.html on session.dispatch
+      // (spec §4.2/§6.1), opens a fresh WS B for session.claim/session.abort
+      // (spec §4.3), and renders renderUsePointPage / renderOrderPage. The
+      // actual requestPayment call lives in payment.html (Task 6) — order.html
+      // hands the chosen pointUse off via sessionStorage and navigates.
 
-      const fetchPayment = async () => {
-        const { value: token } = await sdk.storage.get({ key: "token" });
+      async function main() {
+        // 1. sessionId from URL hash. home.html sets `./order.html#<sessionId>`.
+        const sessionId = location.hash.slice(1);
 
-        const response = await fetch("https://example.com", {
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-        })
-          .then((response) => response.json())
-          .catch(() => ORDER);
-
-        return response;
-      };
-
-      const onHandlePayment = async () => {
-        const order = await fetchPayment();
-
-        if (order == null) {
-          return null;
+        // 2. Dispatch payload stashed by home.html. Validate kind + sessionId
+        //    match — anything else is a stale or wrong-page invocation.
+        const dispatchJson = sessionStorage.getItem("smartdoctor.dispatch");
+        const dispatch = dispatchJson ? JSON.parse(dispatchJson) : null;
+        if (
+          !dispatch ||
+          dispatch.kind !== "payment" ||
+          dispatch.sessionId !== sessionId
+        ) {
+          sdk.app.setIdle();
+          return;
         }
 
-        renderOrderPage(order);
-      };
-
-      const renderOrderPage = async (order) => {
-        sdk.template.renderOrderPage({
-          order,
-          onClick: async () => {
-            const price = order.summary.totalAmount;
-            const tax = Math.floor(price / 11);
-            const supplyValue = price - tax;
-
-            const result = await sdk.payment.requestPayment({
-              paymentKey: "paymentKey",
-              tax,
-              supplyValue,
-              tip: 0,
-            });
-
-            if (result.type === "CANCELED" || result.type === "TIMEOUT") {
-              return;
-            }
-
-            switch (result.response.paymentMethod) {
-              case "CARD":
-                console.log(result.response.card);
-                break;
-              case "BARCODE":
-                console.log(result.response.barcode);
-                break;
-              case "CASH":
-                console.log(result.response.cash);
-                break;
-            }
-          },
-          onBack: () => {
-            location.href = "home.html"
-          },
+        // 3. Token defensive read — router/home should have caught this, but
+        //    direct nav to order.html is possible. Token-null → onboarding.
+        const { value: token } = await sdk.storage.get({
+          key: "smartdoctor.token",
         });
-      };
+        if (token == null) {
+          location.href = "./onboarding.html";
+          return;
+        }
 
-      onHandlePayment();
+        // 4. Open a fresh WS B connection. order.html is not the dispatcher —
+        //    we only need it to send session.claim and (optionally) session.abort.
+        //    No heartbeat, no inbound dispatcher: payment.html will open its own
+        //    socket, and home.html re-opens the long-lived one when we go idle.
+        const ws = new WebSocket(
+          window.smartdoctor.backendWsUrl(
+            "/plugin?token=" + encodeURIComponent(token),
+          ),
+        );
+
+        ws.onopen = () => {
+          // Spec §4.3: plugin acknowledges it's about to show the order page.
+          ws.send(
+            JSON.stringify({
+              type: "session.claim",
+              payload: { sessionId },
+            }),
+          );
+        };
+
+        ws.onerror = (ev) => {
+          console.warn("[smartdoctor] order.html ws error", ev);
+        };
+
+        // 5. Compute usable cash. Spec §4.4 / PDF p.9:
+        //      usableCash = floor(min(balance, treatmentTotal) / 100) * 100
+        //    Math.floor (NOT round) — round-down ensures we never offer more
+        //    cash than the customer holds after the floor-to-100 step.
+        function computeUsableCash(d) {
+          const treatmentTotal = d.amount.supplyValue + d.amount.tax;
+          const balance = d.pointContext?.availableBalance ?? 0;
+          const rawUsable = Math.min(balance, treatmentTotal);
+          return Math.floor(rawUsable / 100) * 100;
+        }
+
+        // 6. Build the renderOrderPage snapshot for a given pointUse. Spec §6.2 +
+        //    spec §2.3 renderOrderPage shape. Backend already populates items /
+        //    discounts / summary on dispatch.orderSnapshot; we only adjust for
+        //    the chosen point use and always set paidAmount + earned.
+        //    - pointUse > 0: append "메디캐시 사용" to discounts and bump
+        //      summary.discountAmount.
+        //    - Always: set summary.paidAmount = totalAmount − discountAmount.
+        //    - Always: set summary.earned from dispatch.pointContext (the
+        //      discriminated-union value:number form requires `suffix`).
+        function buildOrderSnapshotWithPoints(snapshot, pointUse, pointContext) {
+          const baseDiscounts = snapshot.discounts ?? [];
+          const baseSummary = snapshot.summary ?? {};
+          const baseDiscountAmount = baseSummary.discountAmount ?? 0;
+
+          const discounts =
+            pointUse > 0
+              ? [...baseDiscounts, { label: "메디캐시 사용", value: pointUse }]
+              : baseDiscounts;
+
+          const discountAmount =
+            pointUse > 0 ? baseDiscountAmount + pointUse : baseDiscountAmount;
+
+          const summary = {
+            ...baseSummary,
+            discountAmount,
+            paidAmount: baseSummary.totalAmount - discountAmount,
+            earned: {
+              label: pointContext.earnLabel,
+              value: pointContext.earnAmount,
+              suffix: pointContext.earnSuffix,
+            },
+          };
+
+          return {
+            ...snapshot,
+            discounts,
+            summary,
+          };
+        }
+
+        // 7. Hand off to payment.html with the chosen pointUse stashed in a
+        //    separate sessionStorage key (`smartdoctor.dispatch.pointUse`) so
+        //    payment.html can read both the dispatch payload and the user's
+        //    point choice. Close our WS first — payment.html opens its own.
+        function showOrderPage(pointUse) {
+          const orderForDisplay = buildOrderSnapshotWithPoints(
+            dispatch.orderSnapshot,
+            pointUse,
+            dispatch.pointContext,
+          );
+
+          sdk.template.renderOrderPage({
+            order: orderForDisplay,
+            localeCode: "ko",
+            onClick: () => {
+              sessionStorage.setItem(
+                "smartdoctor.dispatch.pointUse",
+                String(pointUse),
+              );
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.close();
+              }
+              location.href = "./payment.html#" + sessionId;
+            },
+            // Spec §2.3: renderOrderPage's onBack is [GAP] — not in the
+            // documented Params block. Wire it but spec §6.2 explicitly says
+            // "abort correctness must not depend solely on this callback firing."
+            // The CRM-side abort path covers the case where this never fires.
+            onBack: () => {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(
+                  JSON.stringify({
+                    type: "session.abort",
+                    payload: { sessionId, reason: "USER_BACKED_OUT" },
+                  }),
+                );
+                ws.close();
+              }
+              sdk.app.setIdle();
+            },
+          });
+        }
+
+        // 8. Decide between use-point page and direct order page. Spec §4.4:
+        //    "If 사용 가능 캐시 < minUseAmount, skip renderUsePointPage entirely."
+        const usableCash = computeUsableCash(dispatch);
+        const treatmentTotal =
+          dispatch.amount.supplyValue + dispatch.amount.tax;
+        const minUse = dispatch.pointContext?.minUseAmount ?? 0;
+
+        if (usableCash >= minUse && usableCash > 0) {
+          sdk.template.renderUsePointPage({
+            points: [{ name: "사용 가능한 메디캐시", amount: usableCash }],
+            summary: {
+              pointUsedAmount: usableCash,
+              paymentAmount: treatmentTotal - usableCash,
+            },
+            cta: {
+              // Per PDF: binary choice, not a slider.
+              submit: { onClick: () => showOrderPage(usableCash) }, // 전액 사용
+              cancel: { onClick: () => showOrderPage(0) }, // 사용 안 함
+            },
+          });
+        } else {
+          showOrderPage(0);
+        }
+      }
+
+      main();
     </script>
   </body>
 </html>
