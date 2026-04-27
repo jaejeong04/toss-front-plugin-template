@@ -50,15 +50,7 @@
           return;
         }
 
-        // 3. Token defensive read — router/home should have caught this, but
-        //    direct nav to order.html is possible. Token-null → onboarding.
-        const { value: token } = await sdk.storage.get({
-          key: "smartdoctor.token",
-        });
-        if (token == null) {
-          location.href = "./onboarding.html";
-          return;
-        }
+        // 3. Device serial — backend trusts it via partner-portal registration.
         const { serialNumber } = await sdk.app.getSerialNumber();
 
         // 4. Open a fresh WS B connection. order.html is not the dispatcher —
@@ -67,7 +59,7 @@
         //    socket, and home.html re-opens the long-lived one when we go idle.
         const ws = new WebSocket(
           window.smartdoctor.backendWsUrl(
-            "/plugin?token=" + encodeURIComponent(token),
+            "/plugin?serial=" + encodeURIComponent(serialNumber),
           ),
         );
 

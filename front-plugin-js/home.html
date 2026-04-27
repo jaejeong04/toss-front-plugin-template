@@ -35,25 +35,16 @@
         //    name (sdk.app.getMerchant().name) below the default illustration.
         sdk.template.renderIdlePage({ type: "default" });
 
-        // 2. Token defensive read. The router in index.html should already have
-        //    redirected unauthenticated devices to onboarding, but home.html may
-        //    be reached via direct navigation.
-        const { value: token } = await sdk.storage.get({
-          key: "smartdoctor.token",
-        });
-        if (token == null) {
-          location.href = "./onboarding.html";
-          return;
-        }
-
-        // 3. Device serial — destructure (spec §2.5: returns { serialNumber }).
+        // 2. Device serial — destructure (spec §2.5: returns { serialNumber }).
+        //    The serial is the device identity; backend trusts it because Toss
+        //    registers test devices on the partner-portal side.
         const { serialNumber } = await sdk.app.getSerialNumber();
 
-        // 4. Open WS B (plugin ↔ our backend). Standard browser WebSocket;
+        // 3. Open WS B (plugin ↔ our backend). Standard browser WebSocket;
         //    sdk.webSocket is a server namespace per spec §2.7 — not what we want.
         const ws = new WebSocket(
           window.smartdoctor.backendWsUrl(
-            "/plugin?token=" + encodeURIComponent(token),
+            "/plugin?serial=" + encodeURIComponent(serialNumber),
           ),
         );
 
@@ -248,9 +239,10 @@
         };
 
         // 8. On close — clear heartbeat, log, no auto-reconnect (Toss's lifecycle
-        //    will reopen the plugin). 10. Special-case 4401: invalid token →
-        //    clear token + redirect to onboarding (spec §4.1).
-        ws.onclose = async (ev) => {
+        //    will reopen the plugin). Backend rejection of an unregistered
+        //    serial is a partner-portal config problem, not something the
+        //    plugin can recover from — just log the close code.
+        ws.onclose = (ev) => {
           if (heartbeatTimer != null) {
             clearInterval(heartbeatTimer);
             heartbeatTimer = null;
@@ -260,10 +252,6 @@
             "code=" + ev.code,
             "reason=" + ev.reason,
           );
-          if (ev.code === 4401) {
-            await sdk.storage.remove({ key: "smartdoctor.token" });
-            location.href = "./onboarding.html";
-          }
         };
 
         ws.onerror = (ev) => {

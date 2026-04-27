@@ -333,20 +333,13 @@
           return;
         }
 
-        // 3. Token defensive read.
-        const { value: token } = await sdk.storage.get({
-          key: "smartdoctor.token",
-        });
-        if (token == null) {
-          location.href = "./onboarding.html";
-          return;
-        }
+        // 3. Device serial — backend trusts it via partner-portal registration.
         const { serialNumber } = await sdk.app.getSerialNumber();
 
         // 4. Open WS B. Wait for onopen before dispatching.
         const ws = new WebSocket(
           window.smartdoctor.backendWsUrl(
-            "/plugin?token=" + encodeURIComponent(token),
+            "/plugin?serial=" + encodeURIComponent(serialNumber),
           ),
         );
 

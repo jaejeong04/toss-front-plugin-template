@@ -26,16 +26,7 @@
   <body>
     <div id="app"></div>
     <script>
-      async function checkToken() {
-        const { value: token } = await sdk.storage.get({ key: "smartdoctor.token" });
-
-        if (token != null) {
-          location.href = "./home.html";
-        } else {
-          location.href = "./onboarding.html";
-        }
-      }
-      checkToken();
+      location.href = "./home.html";
     </script>
   </body>
 </html>
