@@ -27,24 +27,13 @@
     <div id="app"></div>
     <script>
       async function checkToken() {
-        const useTokenAuthorization = true;
+        const { value: token } = await sdk.storage.get({ key: "smartdoctor.token" });
 
-        /**
-         * 초기 설정 예시입니다.
-         * 토큰 인증을 사용한다면 onboarding.html 에서 획득한 token 검증 로직을 수행하고,
-         * 토큰 인증을 사용하지 않는다면 바로 home.html으로 이동합니다.
-         **/
-        if (useTokenAuthorization) {
-          const { value: token } = await sdk.storage.get({ key: "token" });
-
-          if (token != null) {
-            location.href = "./home.html";
-          } else {
-            location.href = "./onboarding.html";
-          }
-        } else {
+        if (token != null) {
           location.href = "./home.html";
-        }        
+        } else {
+          location.href = "./onboarding.html";
+        }
       }
       checkToken();
     </script>
