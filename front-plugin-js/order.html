@@ -118,9 +118,17 @@
           const discountAmount =
             pointUse > 0 ? baseDiscountAmount + pointUse : baseDiscountAmount;
 
-          // Defensive: pointContext may be absent (no point program). Fall back
-          // to whatever the backend already supplied on baseSummary, or omit.
-          const earned = pointContext
+          // Defensive: pointContext may exist with availableBalance/minUseAmount
+          // but lack earn-program fields (e.g. hospital with 메디캐시 use enabled
+          // but no earn program). Build the discriminated-union earned shape only
+          // when ALL three fields are present — otherwise undefined values would
+          // violate Toss's "value: number requires suffix: string" contract.
+          const hasEarn =
+            pointContext &&
+            pointContext.earnLabel != null &&
+            pointContext.earnAmount != null &&
+            pointContext.earnSuffix != null;
+          const earned = hasEarn
             ? {
                 label: pointContext.earnLabel,
                 value: pointContext.earnAmount,
