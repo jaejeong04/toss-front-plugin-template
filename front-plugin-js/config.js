@@ -1,8 +1,9 @@
 window.smartdoctor = window.smartdoctor || {};
 
 window.smartdoctor.config = {
-  // backend not built yet — placeholder per user direction
-  BACKEND_HOST: "TODO",
+  // Dev backend host — must match the Toss test project's ACL (URL).
+  // Swap for the live host before promoting to 라이브 배포.
+  BACKEND_HOST: "develop.api.openapi.smartdoctor.systems",
 };
 
 // path must start with "/" — concatenated as-is, no normalization
