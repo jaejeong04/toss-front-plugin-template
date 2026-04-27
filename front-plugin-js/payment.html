@@ -94,6 +94,46 @@
           },
         });
 
+        // 3a. 100% 메디캐시 coverage — no Toss-side payment to make.
+        //     Toss docs only document non-zero requestPayment examples and don't
+        //     specify behavior at tax=0/supplyValue=0, so we skip the SDK call
+        //     entirely. Backend contract: when chargedSupplyValue === 0 AND
+        //     chargedTax === 0 AND tossResponse === null, treat as a points-only
+        //     payment (no card/cash transaction occurred).
+        if (charged === 0) {
+          sendWs(ws, {
+            type: "session.result",
+            payload: {
+              sessionId: dispatch.sessionId,
+              pointUseAmount: pointUse,
+              chargedSupplyValue: 0,
+              chargedTax: 0,
+              tossResponse: null,
+            },
+          });
+          sessionStorage.removeItem("smartdoctor.dispatch");
+          sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
+          const { name: hospitalName } = await sdk.app.getMerchant();
+          closeWs(ws);
+          sdk.template.renderResultPage({
+            type: "image",
+            status: "success",
+            title: "수납 완료",
+            description: `${hospitalName}에\n 방문해주셔서 감사합니다`,
+            timerMs: 5000,
+            onTimeout: () => sdk.app.setIdle(),
+            buttons: [
+              {
+                label: "확인",
+                onClick: () => sdk.app.setIdle(),
+                closeOnClick: true,
+              },
+            ],
+            localeCode: "ko",
+          });
+          return;
+        }
+
         // 4. Persist pendingPayment BEFORE requestPayment. paymentKey ===
         //    sessionId per spec §4.2. Used by home.html's recovery helper
         //    if this page crashes.
