@@ -6,11 +6,6 @@ window.smartdoctor.config = {
   BACKEND_HOST: "develop.api.openapi.smartdoctor.systems",
 };
 
-// path must start with "/" — concatenated as-is, no normalization
-window.smartdoctor.backendUrl = function (path) {
-  return `https://${window.smartdoctor.config.BACKEND_HOST}${path}`;
-};
-
 window.smartdoctor.backendWsUrl = function (path) {
   return `wss://${window.smartdoctor.config.BACKEND_HOST}${path}`;
 };
