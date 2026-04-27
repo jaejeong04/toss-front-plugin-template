@@ -26,12 +26,206 @@
   <body>
     <div id="app"></div>
     <script>
+      // home.html — idle screen + WS B dispatcher. Spec §6.1.
+      // Heartbeat cadence is fixed by spec §4.1 ("client sends ping every 20s").
+      const HEARTBEAT_MS = 20000;
 
-      const onIdle = () => {
-        sdk.template.renderIdlePage();
-      };
+      async function main() {
+        // 1. Idle screen. Per spec §6.1, type:"default" — Toss displays the merchant
+        //    name (sdk.app.getMerchant().name) below the default illustration.
+        sdk.template.renderIdlePage({ type: "default" });
 
-      onIdle();
+        // 2. Token defensive read. The router in index.html should already have
+        //    redirected unauthenticated devices to onboarding, but home.html may
+        //    be reached via direct navigation.
+        const { value: token } = await sdk.storage.get({
+          key: "smartdoctor.token",
+        });
+        if (token == null) {
+          location.href = "./onboarding.html";
+          return;
+        }
+
+        // 3. Device serial — destructure (spec §2.5: returns { serialNumber }).
+        const { serialNumber } = await sdk.app.getSerialNumber();
+
+        // 4. Open WS B (plugin ↔ our backend). Standard browser WebSocket;
+        //    sdk.webSocket is a server namespace per spec §2.7 — not what we want.
+        const ws = new WebSocket(
+          window.smartdoctor.backendWsUrl(
+            "/plugin?token=" + encodeURIComponent(token),
+          ),
+        );
+
+        let heartbeatTimer = null;
+
+        ws.onopen = async () => {
+          // 5. device.register — first message after connect (spec §4.3).
+          ws.send(
+            JSON.stringify({
+              type: "device.register",
+              payload: { serialNumber, sdkVersion: "v0" },
+            }),
+          );
+
+          // 6. Application-level heartbeat (spec §4.1). Backend tracks misses
+          //    and drops the socket after 3; plugin only sends.
+          heartbeatTimer = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "ping", payload: {} }));
+            }
+          }, HEARTBEAT_MS);
+
+          // 9. Pending-payment recovery (spec §5). The helper no-ops when
+          //    there's no pending entry; pass the open ws so a recovered
+          //    session.result can be sent.
+          await window.smartdoctor.runPendingPaymentRecovery({ ws });
+        };
+
+        // 7. Inbound dispatcher (spec §4.2).
+        ws.onmessage = async (ev) => {
+          const msg = JSON.parse(ev.data);
+
+          switch (msg.type) {
+            case "device.registered": {
+              // Ack — log only.
+              console.log("[smartdoctor] device.registered", msg.payload);
+              return;
+            }
+
+            case "pong": {
+              // Informational. Backend tracks misses; plugin does not.
+              return;
+            }
+
+            case "session.dispatch": {
+              const payload = msg.payload || {};
+              // Stash the full dispatch payload so the next page can read it
+              // without a separate backend fetch (spec §6.1, §6.2).
+              sessionStorage.setItem(
+                "smartdoctor.dispatch",
+                JSON.stringify(payload),
+              );
+              if (payload.kind === "payment") {
+                location.href = "./order.html#" + payload.sessionId;
+              } else if (payload.kind === "cancel") {
+                // Cancel flow lives in payment.html; order.html is fresh-payment-only.
+                location.href = "./payment.html#" + payload.refundId;
+              } else {
+                console.warn(
+                  "[smartdoctor] session.dispatch unknown kind",
+                  payload.kind,
+                );
+              }
+              return;
+            }
+
+            case "session.reconcile": {
+              // Spec §4.2: backend suspects an EXPIRED session may actually have
+              // succeeded on the device. Look it up locally; only respond on
+              // success. PAYMENT_NOT_FOUND → send nothing.
+              const paymentKey = msg.payload && msg.payload.paymentKey;
+              const sessionId = msg.payload && msg.payload.sessionId;
+
+              // Try to enrich with the locally-stashed pending-payment amounts;
+              // backend falls back to its own session.chargeContext if these
+              // are null.
+              let pointUseAmount = null;
+              let chargedSupplyValue = null;
+              let chargedTax = null;
+              const { value: pendingJson } = await sdk.storage.get({
+                key: window.smartdoctor.PENDING_KEY,
+              });
+              if (pendingJson) {
+                const pending = JSON.parse(pendingJson);
+                if (pending && pending.paymentKey === paymentKey) {
+                  pointUseAmount = pending.pointUseAmount ?? null;
+                  chargedSupplyValue = pending.chargedSupplyValue ?? null;
+                  chargedTax = pending.chargedTax ?? null;
+                }
+              }
+
+              try {
+                const result = await sdk.payment.getPayment({ paymentKey });
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(
+                    JSON.stringify({
+                      type: "session.result",
+                      payload: {
+                        sessionId,
+                        pointUseAmount,
+                        chargedSupplyValue,
+                        chargedTax,
+                        tossResponse: result,
+                        late: true,
+                      },
+                    }),
+                  );
+                }
+              } catch (e) {
+                // PAYMENT_NOT_FOUND is the documented expected outcome — spec
+                // mandates "send nothing", so we explicitly swallow it. Any
+                // other error: log; backend keeps the session in EXPIRED.
+                if (e && e.code === "PAYMENT_NOT_FOUND") {
+                  return;
+                }
+                console.warn("[smartdoctor] session.reconcile error", e);
+              }
+              return;
+            }
+
+            case "session.abort": {
+              // Spec §4.2: stop rendering order/point page and return to idle.
+              // From home.html we are already idle; setIdle() defensively.
+              // Do NOT call requestPayment.
+              console.log("[smartdoctor] session.abort", msg.payload);
+              sdk.app.setIdle();
+              return;
+            }
+
+            case "error": {
+              const p = msg.payload || {};
+              console.warn(
+                "[smartdoctor] backend error",
+                p.code,
+                p.message,
+                p.sessionId,
+              );
+              return;
+            }
+
+            default: {
+              console.warn("[smartdoctor] unknown ws message", msg.type, msg);
+              return;
+            }
+          }
+        };
+
+        // 8. On close — clear heartbeat, log, no auto-reconnect (Toss's lifecycle
+        //    will reopen the plugin). 10. Special-case 4401: invalid token →
+        //    clear token + redirect to onboarding (spec §4.1).
+        ws.onclose = async (ev) => {
+          if (heartbeatTimer != null) {
+            clearInterval(heartbeatTimer);
+            heartbeatTimer = null;
+          }
+          console.log(
+            "[smartdoctor] ws closed",
+            "code=" + ev.code,
+            "reason=" + ev.reason,
+          );
+          if (ev.code === 4401) {
+            await sdk.storage.remove({ key: "smartdoctor.token" });
+            location.href = "./onboarding.html";
+          }
+        };
+
+        ws.onerror = (ev) => {
+          console.warn("[smartdoctor] ws error", ev);
+        };
+      }
+
+      main();
     </script>
   </body>
 </html>
