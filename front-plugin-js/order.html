@@ -88,9 +88,10 @@
         //      usableCash = floor(min(balance, treatmentTotal) / 100) * 100
         //    Math.floor (NOT round) — round-down ensures we never offer more
         //    cash than the customer holds after the floor-to-100 step.
-        function computeUsableCash(d) {
-          const treatmentTotal = d.amount.supplyValue + d.amount.tax;
-          const balance = d.pointContext?.availableBalance ?? 0;
+        function computeUsableCash(dispatch) {
+          const treatmentTotal =
+            dispatch.amount.supplyValue + dispatch.amount.tax;
+          const balance = dispatch.pointContext?.availableBalance ?? 0;
           const rawUsable = Math.min(balance, treatmentTotal);
           return Math.floor(rawUsable / 100) * 100;
         }
@@ -117,15 +118,21 @@
           const discountAmount =
             pointUse > 0 ? baseDiscountAmount + pointUse : baseDiscountAmount;
 
+          // Defensive: pointContext may be absent (no point program). Fall back
+          // to whatever the backend already supplied on baseSummary, or omit.
+          const earned = pointContext
+            ? {
+                label: pointContext.earnLabel,
+                value: pointContext.earnAmount,
+                suffix: pointContext.earnSuffix,
+              }
+            : baseSummary.earned;
+
           const summary = {
             ...baseSummary,
             discountAmount,
             paidAmount: baseSummary.totalAmount - discountAmount,
-            earned: {
-              label: pointContext.earnLabel,
-              value: pointContext.earnAmount,
-              suffix: pointContext.earnSuffix,
-            },
+            ...(earned !== undefined ? { earned } : {}),
           };
 
           return {
@@ -173,6 +180,11 @@
                 );
                 ws.close();
               }
+              // Hygiene: clear the dispatch payload + point choice so a stale
+              // entry can't leak into the next session. home.html overwrites
+              // on the next dispatch anyway, but cleaning up here is cheap.
+              sessionStorage.removeItem("smartdoctor.dispatch");
+              sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
               sdk.app.setIdle();
             },
           });
@@ -203,7 +215,10 @@
         }
       }
 
-      main();
+      main().catch((err) => {
+        console.error("[smartdoctor] order.html fatal", err);
+        sdk.app.setIdle();
+      });
     </script>
   </body>
 </html>
