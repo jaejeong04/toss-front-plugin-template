@@ -221,7 +221,13 @@
                   String(pointUse),
                 );
                 // Open a fresh WS for the retry — the prior one is closed.
-                runFreshFlow();
+                runFreshFlow().catch((err) => {
+                  console.error(
+                    "[smartdoctor] payment.html retry fatal",
+                    err,
+                  );
+                  sdk.app.setIdle();
+                });
               },
             },
           });
@@ -245,8 +251,10 @@
           },
         });
 
-        // 3. Hygiene: clear dispatch (no pointUse on the cancel branch).
+        // 3. Hygiene: clear dispatch (no pointUse on the cancel branch, but
+        //    defensively remove a stale leftover from a prior crashed session).
         sessionStorage.removeItem("smartdoctor.dispatch");
+        sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
 
         // 4. Render result.
         if (result.type === "SUCCESS") {
@@ -333,6 +341,7 @@
           location.href = "./onboarding.html";
           return;
         }
+        const { serialNumber } = await sdk.app.getSerialNumber();
 
         // 4. Open WS B. Wait for onopen before dispatching.
         const ws = new WebSocket(
@@ -382,6 +391,13 @@
         };
 
         ws.onopen = async () => {
+          // spec §4.3: first message after connect
+          ws.send(
+            JSON.stringify({
+              type: "device.register",
+              payload: { serialNumber, sdkVersion: "v0" },
+            }),
+          );
           // 6. Dispatch by kind + hash match.
           if (dispatch.kind === "payment" && dispatch.sessionId === hashId) {
             await runPayment(ws, dispatch);

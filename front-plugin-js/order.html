@@ -59,6 +59,7 @@
           location.href = "./onboarding.html";
           return;
         }
+        const { serialNumber } = await sdk.app.getSerialNumber();
 
         // 4. Open a fresh WS B connection. order.html is not the dispatcher —
         //    we only need it to send session.claim and (optionally) session.abort.
@@ -71,6 +72,13 @@
         );
 
         ws.onopen = () => {
+          // spec §4.3: first message after connect
+          ws.send(
+            JSON.stringify({
+              type: "device.register",
+              payload: { serialNumber, sdkVersion: "v0" },
+            }),
+          );
           // Spec §4.3: plugin acknowledges it's about to show the order page.
           ws.send(
             JSON.stringify({
