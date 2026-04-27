@@ -16,6 +16,10 @@ window.smartdoctor.backendWsUrl = function (path) {
 
 window.smartdoctor.PENDING_KEY = "smartdoctor.pendingPayment";
 
+// Returns { sessionId } on a successful recovery send (so the caller can
+// dedupe against a concurrent session.reconcile for the same sessionId), or
+// null in every other case (no pending entry, corrupt entry, PAYMENT_NOT_FOUND,
+// no live ws, or any other error).
 window.smartdoctor.runPendingPaymentRecovery = async function ({ ws } = {}) {
   let pendingJson;
   try {
@@ -23,11 +27,11 @@ window.smartdoctor.runPendingPaymentRecovery = async function ({ ws } = {}) {
     pendingJson = res && res.value;
   } catch (e) {
     console.warn("[smartdoctor] pending payment storage read failed", e);
-    return;
+    return null;
   }
 
   if (!pendingJson) {
-    return;
+    return null;
   }
 
   let pending;
@@ -35,7 +39,7 @@ window.smartdoctor.runPendingPaymentRecovery = async function ({ ws } = {}) {
     pending = JSON.parse(pendingJson);
   } catch (e) {
     console.warn("[smartdoctor] pending payment JSON parse failed", e);
-    return;
+    return null;
   }
 
   if (!pending || !pending.paymentKey) {
@@ -45,7 +49,7 @@ window.smartdoctor.runPendingPaymentRecovery = async function ({ ws } = {}) {
     } catch (e) {
       console.warn("[smartdoctor] pending payment remove failed", e);
     }
-    return;
+    return null;
   }
 
   try {
@@ -68,9 +72,11 @@ window.smartdoctor.runPendingPaymentRecovery = async function ({ ws } = {}) {
         }),
       );
       await sdk.storage.remove({ key: window.smartdoctor.PENDING_KEY });
+      return { sessionId: pending.sessionId };
     }
     // No ws (or ws not open): keep storage so a later page with a live WS
     // can finish posting session.result. Spec §5.
+    return null;
   } catch (e) {
     // TODO(verify-error-shape): SDK error shape isn't publicly documented — verify on real device.
     if (e && e.code === "PAYMENT_NOT_FOUND") {
@@ -80,9 +86,10 @@ window.smartdoctor.runPendingPaymentRecovery = async function ({ ws } = {}) {
       } catch (removeErr) {
         console.warn("[smartdoctor] pending payment remove failed", removeErr);
       }
-      return;
+      return null;
     }
     // Any other error: leave storage in place, swallow, log for debug.
     console.warn("[smartdoctor] pending payment recovery error", e);
+    return null;
   }
 };
