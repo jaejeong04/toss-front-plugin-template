@@ -50,23 +50,22 @@
           /**
            * 유저 인증 예시 화면입니다.
            * 서버 인증 구성에 따라 이메일 인증을 사용하실 수 도 있고, 기기/매장 인증을 사용하실 수 도 있습니다.
-           * 
+           *
            **/
           const { serialNumber } = await sdk.app.getSerialNumber();
-          const response = await fetch("https://example.com", {
+          const response = await fetch(`https://${window.smartdoctor.config.BACKEND_HOST}/plugin/auth/onboard`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
             },
             body: JSON.stringify({ ...values, serialNumber }),
-          }).then((response) => response.json());
+          });
+          const { token } = await response.json();
 
-          await sdk.storage.set({ key: "token", value: token });
-          location.href = "./home";
+          await sdk.storage.set({ key: "smartdoctor.token", value: token });
+          location.href = "./home.html";
         },
       });
-
-      document.getElementsByName("serialNumber")[0].value = "1234";
     </script>
   </body>
 </html>
