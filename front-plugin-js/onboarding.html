@@ -53,13 +53,14 @@
            *
            **/
           const { serialNumber } = await sdk.app.getSerialNumber();
-          const response = await fetch(`https://${window.smartdoctor.config.BACKEND_HOST}/plugin/auth/onboard`, {
+          const response = await fetch(window.smartdoctor.backendUrl("/plugin/auth/onboard"), {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
             },
             body: JSON.stringify({ ...values, serialNumber }),
           });
+          if (!response.ok) throw new Error("Onboarding failed: HTTP " + response.status);
           const { token } = await response.json();
 
           await sdk.storage.set({ key: "smartdoctor.token", value: token });

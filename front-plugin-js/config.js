@@ -5,6 +5,15 @@ window.smartdoctor.config = {
   BACKEND_HOST: "TODO",
 };
 
+// path must start with "/" — concatenated as-is, no normalization
+window.smartdoctor.backendUrl = function (path) {
+  return `https://${window.smartdoctor.config.BACKEND_HOST}${path}`;
+};
+
+window.smartdoctor.backendWsUrl = function (path) {
+  return `wss://${window.smartdoctor.config.BACKEND_HOST}${path}`;
+};
+
 window.smartdoctor.PENDING_KEY = "smartdoctor.pendingPayment";
 
 window.smartdoctor.runPendingPaymentRecovery = async function ({ ws } = {}) {
