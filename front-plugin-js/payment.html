@@ -36,6 +36,11 @@
       // (spec §5). Skipping it here avoids a race where a stale recovery
       // overwrites the new pending-payment storage we're about to write.
 
+      // Spec §4.1: client sends ping every 20s; backend drops after 3 misses.
+      // The user can sit on the Toss native payment UI for up to timeoutMs
+      // (default 60s), so we ping to keep the socket alive during that window.
+      const HEARTBEAT_MS = 20000;
+
       // Helper: spec §6.2 mapTossFailureToKorean.
       function mapTossFailureToKorean(result) {
         if (result.type === "TIMEOUT") return "시간 초과";
@@ -382,6 +387,7 @@
             "/plugin?serial=" + encodeURIComponent(serialNumber),
           ),
         );
+        let heartbeatTimer = null;
 
         // 5. Minimal inbound handler — payment.html is mid-flow, not the
         //    dispatcher. session.abort defense-in-depth per spec §8.
@@ -394,6 +400,9 @@
             return;
           }
           switch (msg.type) {
+            case "pong":
+              // Informational. Backend tracks heartbeat misses, not us.
+              return;
             case "session.abort":
               // Per spec §8 backend should NOT send this once we're in
               // IN_PROGRESS — log and continue.
@@ -416,6 +425,10 @@
         };
 
         ws.onclose = (ev) => {
+          if (heartbeatTimer != null) {
+            clearInterval(heartbeatTimer);
+            heartbeatTimer = null;
+          }
           console.log(
             "[smartdoctor] payment.html ws closed",
             "code=" + ev.code,
@@ -431,6 +444,11 @@
               payload: { serialNumber, sdkVersion: "v0" },
             }),
           );
+          heartbeatTimer = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "ping", payload: {} }));
+            }
+          }, HEARTBEAT_MS);
           // 6. Dispatch by kind + hash match.
           if (dispatch.kind === "payment" && dispatch.sessionId === hashId) {
             await runPayment(ws, dispatch);

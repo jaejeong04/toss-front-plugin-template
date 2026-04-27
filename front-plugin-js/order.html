@@ -33,6 +33,11 @@
       // actual requestPayment call lives in payment.html (Task 6) — order.html
       // hands the chosen pointUse off via sessionStorage and navigates.
 
+      // Spec §4.1: client sends ping every 20s; backend drops after 3 misses.
+      // The user can pause on the use-point page indefinitely, so we ping to
+      // keep the socket alive while they decide.
+      const HEARTBEAT_MS = 20000;
+
       async function main() {
         // 1. sessionId from URL hash. home.html sets `./order.html#<sessionId>`.
         const sessionId = location.hash.slice(1);
@@ -55,13 +60,14 @@
 
         // 4. Open a fresh WS B connection. order.html is not the dispatcher —
         //    we only need it to send session.claim and (optionally) session.abort.
-        //    No heartbeat, no inbound dispatcher: payment.html will open its own
-        //    socket, and home.html re-opens the long-lived one when we go idle.
+        //    payment.html will open its own socket, and home.html re-opens the
+        //    long-lived one when we go idle.
         const ws = new WebSocket(
           window.smartdoctor.backendWsUrl(
             "/plugin?serial=" + encodeURIComponent(serialNumber),
           ),
         );
+        let heartbeatTimer = null;
 
         ws.onopen = () => {
           // spec §4.3: first message after connect
@@ -78,6 +84,18 @@
               payload: { sessionId },
             }),
           );
+          heartbeatTimer = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "ping", payload: {} }));
+            }
+          }, HEARTBEAT_MS);
+        };
+
+        ws.onclose = () => {
+          if (heartbeatTimer != null) {
+            clearInterval(heartbeatTimer);
+            heartbeatTimer = null;
+          }
         };
 
         ws.onerror = (ev) => {
