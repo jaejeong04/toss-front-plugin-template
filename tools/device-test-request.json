@@ -1,0 +1,38 @@
+{
+  "clientRequestId": "device-test-0001",
+  "deviceSerialNumber": "258F2010SLR0040",
+  "workstationId": "ws-dev-jj-001",
+  "crmOrigin": {
+    "hospitalId": "99995",
+    "organizationId": "99999997",
+    "customerNumber": "411160",
+    "insuranceSeqNo": 1,
+    "medicalClinicSeqNo": 42,
+    "reservationSeqNo": null,
+    "customerName": "테스트"
+  },
+  "amount": {
+    "supplyValue": 909,
+    "tax": 91,
+    "tip": 0
+  },
+  "pointAccrualTargetAmount": 0,
+  "orderSnapshot": {
+    "items": [
+      {
+        "label": "디바이스 통합 테스트",
+        "value": 1000,
+        "quantity": 1
+      }
+    ],
+    "discounts": [],
+    "summary": {
+      "totalAmount": 1000,
+      "earned": {
+        "label": "이번 결제 적립",
+        "value": 0,
+        "suffix": "캐시"
+      }
+    }
+  }
+}
