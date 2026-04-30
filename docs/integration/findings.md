@@ -72,6 +72,34 @@ Reference harness: `smartdoctor-api/tools/toss-payment-test/{plugin,crm}_client.
 - **CRM-side `refund.result`:** `{status: "SUCCEEDED", refundId, originalSessionId, tossResponse: {full new card SUCCESS}}` ✓
 - **Action:** None. Backend correctly builds cancel params from persisted state and round-trips the response. The contract is solid.
 
+## Real-card device test (1,000원 + immediate refund)
+
+- **Date:** 2026-04-30
+- **Card:** Samsung Mastercard
+- **Amount:** 1,000원 (909 supply + 91 tax)
+- **Outcome:** ✅ payment succeeded; ✅ refund eventually succeeded; net-zero on card.
+- **Real Toss response:** approval `06903313`, van `KIS`, shopCode `193175545`.
+
+**🐛 Bug discovered during this test (terminal-screen-bricks-device):**
+
+After the payment SUCCESS terminal rendered, tapping `확인` on the success screen left the device on a blank/white screen. From backend's perspective the device went **offline** — its WS connection dropped because the plugin blanked. First refund attempt returned:
+
+```json
+{
+  "status": "FAILED",
+  "failureReason": "REFUND_REJECTED_BY_TOSS",
+  "tossResponse": { "type": "FAILED", "response": { "reason": "DEVICE_OFFLINE" } }
+}
+```
+
+After rebooting the device (which re-loaded home.html → re-connected WS), the refund completed cleanly. So the contract is fine — there's a UI lifecycle bug in our plugin between "terminal render" and "return to idle".
+
+**Hypothesis:** `sdk.app.setIdle()` from the success-screen button (`payment.html:133`) is returning the device to OS idle but the plugin's WebView retains whatever was last shown (or shows blank). When the user wakes the device, no fresh `home.html` mounts, no WS reconnects.
+
+**Symptom family:** Same "blank screen, plugin dead" failure mode as the back-arrow bug (Task 12) — different trigger, same hole. The onBack fix made back-arrow safe, but **every transition that just calls `setIdle()` without re-mounting `home.html` is suspect.** Audit pending.
+
+**Numeric note (non-blocking):** `chargedSupplyValue: 910.0` and `chargedTax: 90.0` (floats!) were sent by plugin even though request was 909/91. Validation passed (1000 == 1000), but the breakdown drifted by 1원 each. Likely a float-math artifact in payment.html's charged-amount calculation. Not pursuing now; flag if it ever causes downstream issues.
+
 ## 100% 메디캐시 (`tossResponse: null`)
 
 - **Status:** ❌ **FAIL — backend crashes on `tossResponse: null`**
@@ -95,3 +123,22 @@ Reference harness: `smartdoctor-api/tools/toss-payment-test/{plugin,crm}_client.
   3. Update both specs to align on whichever choice.
 - **FE-side action (if backend picks option 2):** Trivial change in [front-plugin-js/payment.html:108-118](../../front-plugin-js/payment.html) — replace `tossResponse: null` with the agreed sentinel.
 - **Action: file with backend in Slack thread `C099YT4CL75`.** Reproduce: `python3 tools/100pct-medicash-test.py --token crm_qalmighty` against deployed dev with the override JSON.
+
+## Non-zero `pointUseAmount` (any medicash use)
+
+- **Status:** ❌ **FAIL — backend crashes on non-zero `pointUseAmount` in `session.result`**
+- **Date:** 2026-04-30
+- **Original session:** `b1a2dfa0-0866-4708-bf0a-3eec36ce974f`
+- **Test setup:** CRM `session.create` with explicit `pointContext.availableBalance: 500` against 1,000원 total ([tools/device-test-request-medicash.json](../../tools/device-test-request-medicash.json)). Real Samsung Mastercard, real Toss SDK call.
+- **What the device user did:** order page → tapped 메디캐시 사용 → use-points page applied **all 500원** (Toss Front UI is all-or-none by design — no partial amount entry possible) → returned to order page showing 500원 to charge → Toss SDK card terminal → tapped card → real-card SUCCESS screen with valid approval number → 확인 → idle. **No user-visible failure on the device.**
+- **Observed sequence (CRM side):** `session.ack` → `session.status DISPATCHED` → `session.status IN_PROGRESS` → CRM WS aborted **TCP-level** (`no close frame received or sent`) before any `session.result` arrived.
+- **The reason device looked clean:** plugin's Task 17 auto-reconnect re-opened the WS after backend dropped it, masking the backend crash from the device user.
+- **Refund attempt confirmation:** `refund.create` against the same `originalSessionId` over a fresh CRM WS → **WS close 1011 (internal error)** immediately, no `error` frame, no plugin dispatch (device stayed idle). Confirms the original session is stuck `IN_PROGRESS` with partially-written state on backend.
+- **Diagnosis:** `session.result` handler crashes on the points-application code path when `pointUseAmount > 0`, even with valid `tossResponse`. Different trigger from the 100%-medicash bug (non-zero `pointUseAmount` + valid `tossResponse`), same crash family (WS 1011, session poisoned).
+- **Why this wasn't caught earlier:** the Python harness's "happy path with `--use-points`" test ran against customer 411160 whose auto-enriched `pointContext.availableBalance` was 0 → `pointUseAmount = 0` end-to-end → never exercised the points-application path. Today's test is the first time non-zero `pointUseAmount` was driven end-to-end on dev.
+- **Production blast radius:** **100% of medicash use crashes backend.** The Toss Front use-points UI is all-or-none (no partial amount entry possible — UI constraint, intended), so every customer who taps "use points" will land in one of two crash paths:
+  - `availableBalance >= total` → 100%-medicash null-tossResponse crash (existing bug above)
+  - `availableBalance < total` → non-zero `pointUseAmount` crash (this bug)
+- **Real-money side effect:** 500원 was captured on the user's Samsung Mastercard. Cannot be refunded via the broken session (refund handler crashes too). Backend team to either fix the bug + heal the session, or issue a Toss admin cancel directly.
+- **Severity:** higher than 100%-medicash bug. Mixed-payment is the dominant production path; 100% coverage is rarer.
+- **Action: file with backend in Slack thread `C099YT4CL75`** alongside the 100%-medicash bug. Two-bug pattern strongly suggests medicash code paths need a defensive audit, not one-off fixes.
