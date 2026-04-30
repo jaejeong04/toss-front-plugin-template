@@ -29,7 +29,15 @@ Reference harness: `smartdoctor-api/tools/toss-payment-test/{plugin,crm}_client.
 
 ## Reconcile (`late: true`)
 
-(Pending Task 8.)
+- **Status:** ✅ pass
+- **Test:** Plugin in `--no-result` mode → CRM creates session → plugin claims + chargeContext but never sends result → wait ~90s → plugin reconnects with `--reconcile-success` → fakes a SUCCESS reply.
+- **Wall-clock to expiry:** ~90s (spec: `timeoutMs=60000` + 30s grace).
+- **Observed sequence:**
+  - First CRM frame after expiry: `session.result {status: EXPIRED, failureReason: EXPIRED, late: false, tossResponse: null}` — backend correctly preserves `chargedSupplyValue: 27273`, `chargedTax: 2727` from the prior chargeContext.
+  - Plugin reconnect: `session.reconcile` arrives within seconds of `device.registered` ack.
+  - After plugin replies: second CRM frame `session.result {status: SUCCEEDED, late: true, tossResponse: {...}}` — full Toss response forwarded.
+- **Notable:** CRM receives **two** `session.result` frames for the same `sessionId` (EXPIRED then SUCCEEDED-late). CRM-side receipt-write must be idempotent — write only at SUCCEEDED, regardless of order. This isn't a contract change for the plugin (FE never receives the EXPIRED — backend handled it internally), but worth flagging to the CRM team.
+- **Action:** None on FE. Recommend backend team verify CRM idempotency handling — out of FE scope.
 
 ## Refund (`kind: cancel`)
 

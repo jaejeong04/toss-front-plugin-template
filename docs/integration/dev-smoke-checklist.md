@@ -21,7 +21,16 @@ Reference Python harness: `smartdoctor-api/tools/toss-payment-test/` on `feature
 - [x] Validation `pointUseAmount + chargedSupply + chargedTax + tip == original sum` passes (no `error` frame from Core)
 - [x] Anomalies recorded in `findings.md`
 
-(Sections 2–4 added in subsequent tasks.)
+## 2. Reconcile recovery (`late: true`)
+
+- [x] Plugin in `--no-result` mode + CRM creates session → backend lands EXPIRED after ~90s
+- [x] Plugin reconnects in `--reconcile-success` mode
+- [x] Backend sends `session.reconcile` to plugin
+- [x] Plugin replies `session.result` with `late: true`
+- [x] CRM observes `session.result SUCCEEDED late=true` (after a prior `EXPIRED late=false` frame)
+- [x] Wall-clock to expiry recorded in findings.md (~90s)
+
+(Sections 3–4 added in subsequent tasks.)
 
 ## Quick repro (anyone)
 
