@@ -42,11 +42,7 @@
 
         // 3. Open WS B (plugin ↔ our backend). Standard browser WebSocket;
         //    sdk.webSocket is a server namespace per spec §2.7 — not what we want.
-        const ws = new WebSocket(
-          window.smartdoctor.backendWsUrl(
-            "/plugin?serial=" + encodeURIComponent(serialNumber),
-          ),
-        );
+        const ws = new WebSocket(window.smartdoctor.pluginWsUrl(serialNumber));
 
         let heartbeatTimer = null;
 
