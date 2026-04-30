@@ -382,11 +382,7 @@
         const { serialNumber } = await sdk.app.getSerialNumber();
 
         // 4. Open WS B. Wait for onopen before dispatching.
-        const ws = new WebSocket(
-          window.smartdoctor.backendWsUrl(
-            "/plugin?serial=" + encodeURIComponent(serialNumber),
-          ),
-        );
+        const ws = new WebSocket(window.smartdoctor.pluginWsUrl(serialNumber));
         let heartbeatTimer = null;
 
         // 5. Minimal inbound handler — payment.html is mid-flow, not the
