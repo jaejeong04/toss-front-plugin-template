@@ -10,6 +10,8 @@
 - Plugin은 CRM과 직접 통신하지 않는다.
 - DB table은 hospital DB에 생성한다.
 - v1 결제 dispatch는 `excludePaymentTypes: ["CASH"]`로 현금 결제를 제외한다.
+- `hospitalId`는 WS token에서 파싱되는 호출 컨텍스트다. `TOSS_PAYMENT_SESSION`에는 저장하지 않는다.
+- `organizationId`는 Hospital DB의 `CARE_ORG_ID`로 저장하며, `RCPT_INFO` 조회 key로 사용한다.
 
 ## Endpoint Map
 
@@ -32,6 +34,8 @@ Core WebSocket:
 
 - CRM WS A: `wss://<core>/ws/crm?token=<workstationToken>`
 - Plugin WS B: `wss://<core>/ws/plugin?serial=<deviceSerialNumber>&token=<coreToken>`
+
+dev 환경의 core host는 `develop.api.core.smartdoctor.systems`다.
 
 ### Hospital Internal API
 
@@ -109,10 +113,11 @@ CRM 요청:
     "deviceSerialNumber": "TF-000123456",
     "workstationId": "ws_0001",
     "crmOrigin": {
+      "hospitalId": "99995",
       "organizationId": "ORG00001",
       "customerNumber": "CUST000123",
       "insuranceSeqNo": 1,
-      "medicalClinicSeqNo": 42,
+      "clinicSeqNo": 42,
       "reservationSeqNo": null
     },
     "amount": {
@@ -121,8 +126,7 @@ CRM 요청:
       "tip": 0
     },
     "pointAccrualTargetAmount": 20000,
-    "orderSnapshot": {},
-    "pointContext": {}
+    "orderSnapshot": {}
   }
 }
 ```
@@ -141,7 +145,10 @@ Core -> Hospital Feign POST /internal/toss-payment/sessions
 Hospital DB insert TOSS_PAYMENT_SESSION, STATUS_CD=CREATED
 ```
 
-`pointContext` 자동 보강은 CRM이 값을 넘기지 않은 경우에만 수행한다. CRM이 명시적으로 넘긴 `pointContext`는 그대로 저장하고 plugin에 전달한다.
+`crmOrigin.hospitalId`는 포인트 조회/설정 조회와 core -> hospital Feign 인증 컨텍스트에 사용한다.
+`crmOrigin.organizationId`는 `CARE_ORG_ID`로 저장한다.
+
+`pointContext` 자동 보강은 CRM이 필드를 넘기지 않은 경우에만 수행한다. CRM이 명시적으로 넘긴 `pointContext`는 빈 객체 `{}`여도 그대로 저장하고 plugin에 전달한다.
 
 자동 보강 필드:
 
@@ -373,6 +380,27 @@ IN_PROGRESS -> SUCCEEDED
 Core -> Hospital Feign PATCH /internal/toss-payment/sessions/{sessionId}/result
 ```
 
+결과 저장 시 core는 WS token의 hospitalId로 hospital API token을 발급해 hospital internal API를 호출한다.
+hospital은 `@HospitalId` argument resolver로 이 값을 받아 메디캐시 차감 API의 `hospitalId`로 사용한다.
+이 값은 session row에 저장하지 않는다.
+
+100% 메디캐시 결제에서는 plugin이 Toss SDK를 호출하지 않고 `tossResponse`를 `null`로 보낸다.
+Core는 `pointUseAmount`가 원 결제금액 전체를 커버하고 `chargedSupplyValue=0`, `chargedTax=0`이면 이를 `SUCCEEDED`로 저장한다.
+이 경우 Toss 응답, 결제수단, 승인번호, 승인시각은 모두 `null`로 유지한다.
+
+```json
+{
+  "type": "session.result",
+  "payload": {
+    "sessionId": "{sessionId}",
+    "pointUseAmount": 30000,
+    "chargedSupplyValue": 0,
+    "chargedTax": 0,
+    "tossResponse": null
+  }
+}
+```
+
 Core -> CRM:
 
 ```json
@@ -381,7 +409,10 @@ Core -> CRM:
   "payload": {
     "sessionId": "{sessionId}",
     "status": "SUCCEEDED",
-    "tossResponse": {},
+    "tossResponse": {
+      "type": "SUCCESS",
+      "response": {}
+    },
     "pointUseAmount": 1000,
     "chargedSupplyValue": 26364,
     "chargedTax": 2636,
@@ -395,8 +426,11 @@ Core -> CRM:
 }
 ```
 
+100% 메디캐시 성공이면 CRM으로 내려가는 `tossResponse`도 `null`이다.
+
 Core는 CRM에 위 `session.result`를 보내기 전에 hospital 저장 API를 통해 결제 결과를 확정한다.
 `status=SUCCEEDED`이고 `pointUseAmount > 0`이면 hospital은 해당 `TOSS_PAYMENT_SESSION`의 `CARE_ORG_ID`, `CUST_NO`, `INSR_SEQNO`, `MDCL_SEQNO`와 `SEQNO=1`로 `RCPT_INFO`를 찾아 plugin이 보낸 `pointUseAmount`만큼 `RCPT_INFO.DC_AMT`에 가산한다.
+메디캐시 차감 API에는 core가 hospital Feign 호출에 사용한 인증 토큰의 hospitalId를 사용하고, `CARE_ORG_ID`는 Hospital DB의 `RCPT_INFO` 조회 key로만 사용한다.
 포인트 사용액이 있는데 이 갱신이 실패하면 성공 결과를 CRM에 전달하지 않는다.
 
 ## 7. CRM Abort
@@ -612,10 +646,14 @@ Core 처리:
 
 ```text
 Validate original session status=SUCCEEDED
+Validate original session has Toss payment method
 Validate no active refund
 Core -> Hospital Feign POST /internal/toss-payment/refunds
 Build cancelParams from original Toss response and charged amount
 ```
+
+100% 메디캐시 결제는 Toss 승인 정보가 없으므로 현재 `refund.create`에서 plugin cancel dispatch를 만들 수 없다.
+메디캐시 복원/차감 취소 flow는 별도 API/정책이 필요하다.
 
 Core -> Plugin:
 
@@ -683,6 +721,31 @@ Core -> CRM:
 }
 ```
 
+## 11. Error Frames
+
+WebSocket message 처리 중 request validation, invalid state, hospital/reservation upstream 실패, 내부 예외가 발생하면 core는 연결을 1011로 종료하지 않고 `error` frame을 보낸다.
+
+Plugin message에서 `sessionId`를 확인할 수 있으면 plugin WS와 해당 CRM WS 양쪽에 같은 error frame을 보낸다.
+CRM message 처리 중 발생한 예외는 CRM WS에 보낸다.
+
+```json
+{
+  "type": "error",
+  "payload": {
+    "code": "INVALID_STATE",
+    "message": "receipt info not found",
+    "sessionId": "{sessionId}"
+  }
+}
+```
+
+현재 code 값:
+
+- `INVALID_REQUEST`: JSON 파싱 실패, 필수 필드 누락, 금액 검증 실패
+- `INVALID_STATE`: 상태 전이 오류, 원 session이 환불 가능한 상태가 아님, `RCPT_INFO` 미존재 등
+- `UPSTREAM_ERROR`: hospital/reservation 등 Feign upstream 실패
+- `INTERNAL_ERROR`: 그 외 예외
+
 ## State Summary
 
 Session states:
@@ -713,6 +776,7 @@ Core owns:
 - State transition decisions
 - Toss response extraction
 - Hospital Feign calls
+- WS token authentication context, including hospitalId
 
 Hospital owns:
 
@@ -720,18 +784,22 @@ Hospital owns:
 - `TOSS_REFUND_RECORD`
 - MSSQL persistence
 - Idempotency and active refund storage constraints
+- `RCPT_INFO.DC_AMT` update for `pointUseAmount`
+- Medicash deduction request using token-derived hospitalId
 - `TOSS_PAYMENT_SESSION.POINT_ACCR_TARGET_AMT` stores CRM's original `pointAccrualTargetAmount`
 - `TOSS_PAYMENT_SESSION.POINT_CTX_JSON.earnAmount` stores the calculated expected accrual display value
 
 CRM owns:
 
 - Receipt/cardvan data preparation before plugin completion so backend can update `RCPT_INFO.DC_AMT` before `session.result status=SUCCEEDED`
+- Optional explicit `pointContext`; omit the field to use server-side Medicash lookup
 - Bookkeeping retry when CRM commit fails after backend success
 
 Plugin owns:
 
 - Toss SDK calls
 - Order/point UI rendering
+- Point-use amount selection and `session.chargeContext`
 - `requestPayment`
 - `requestPaymentCancel`
 - `getPayment` recovery
