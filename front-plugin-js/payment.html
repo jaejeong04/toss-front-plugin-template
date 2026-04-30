@@ -126,11 +126,11 @@
             title: "수납 완료",
             description: `${hospitalName}에\n 방문해주셔서 감사합니다`,
             timerMs: 5000,
-            onTimeout: () => sdk.app.setIdle(),
+            onTimeout: () => { location.href = "./home.html"; },
             buttons: [
               {
                 label: "확인",
-                onClick: () => sdk.app.setIdle(),
+                onClick: () => { location.href = "./home.html"; },
                 closeOnClick: true,
               },
             ],
@@ -139,7 +139,7 @@
             // screen blanks the WebView (see also: timeout/cancel page
             // bug fix in this commit). All terminal renders get the
             // same onBack.
-            onBack: () => sdk.app.setIdle(),
+            onBack: () => { location.href = "./home.html"; },
             localeCode: "ko",
           });
           return;
@@ -203,11 +203,11 @@
             title: "수납 완료",
             description: `${hospitalName}에\n 방문해주셔서 감사합니다`,
             timerMs: 5000,
-            onTimeout: () => sdk.app.setIdle(),
+            onTimeout: () => { location.href = "./home.html"; },
             buttons: [
               {
                 label: "확인",
-                onClick: () => sdk.app.setIdle(),
+                onClick: () => { location.href = "./home.html"; },
                 closeOnClick: true,
               },
             ],
@@ -216,7 +216,7 @@
             // screen blanks the WebView (see also: timeout/cancel page
             // bug fix in this commit). All terminal renders get the
             // same onBack.
-            onBack: () => sdk.app.setIdle(),
+            onBack: () => { location.href = "./home.html"; },
             localeCode: "ko",
           });
         } else {
@@ -279,7 +279,7 @@
             // device-bricking bug — SDK dismisses its overlay leaving
             // a blank WebView. Session is already terminal (CANCELED/
             // TIMEOUT recorded by backend); just escape to OS idle.
-            onBack: () => sdk.app.setIdle(),
+            onBack: () => { location.href = "./home.html"; },
           });
         }
       }
@@ -316,11 +316,11 @@
             title: "환불 완료",
             description: `${hospitalName}에\n 방문해주셔서 감사합니다`,
             timerMs: 5000,
-            onTimeout: () => sdk.app.setIdle(),
+            onTimeout: () => { location.href = "./home.html"; },
             buttons: [
               {
                 label: "확인",
-                onClick: () => sdk.app.setIdle(),
+                onClick: () => { location.href = "./home.html"; },
                 closeOnClick: true,
               },
             ],
@@ -329,7 +329,7 @@
             // screen blanks the WebView (see also: timeout/cancel page
             // bug fix in this commit). All terminal renders get the
             // same onBack.
-            onBack: () => sdk.app.setIdle(),
+            onBack: () => { location.href = "./home.html"; },
             localeCode: "ko",
           });
         } else {
@@ -367,14 +367,14 @@
             },
             cta: {
               text: "확인",
-              onClick: () => sdk.app.setIdle(),
+              onClick: () => { location.href = "./home.html"; },
             },
             // Session terminal at this point — back-arrow just escapes
             // to OS idle. Without this, a back-tap on the failure
             // screen blanks the WebView (see also: timeout/cancel page
             // bug fix in this commit). All terminal renders get the
             // same onBack.
-            onBack: () => sdk.app.setIdle(),
+            onBack: () => { location.href = "./home.html"; },
           });
         }
       }
@@ -391,7 +391,7 @@
         const dispatchJson = sessionStorage.getItem("smartdoctor.dispatch");
         const dispatch = dispatchJson ? JSON.parse(dispatchJson) : null;
         if (!dispatch) {
-          sdk.app.setIdle();
+          location.href = "./home.html";
           return;
         }
 
@@ -472,14 +472,14 @@
             await runCancel(ws, dispatch);
           } else {
             closeWs(ws);
-            sdk.app.setIdle();
+            location.href = "./home.html";
           }
         };
       }
 
       runFreshFlow().catch((err) => {
         console.error("[smartdoctor] payment.html fatal", err);
-        sdk.app.setIdle();
+        location.href = "./home.html";
       });
     </script>
   </body>
