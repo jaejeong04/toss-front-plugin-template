@@ -62,11 +62,7 @@
         //    we only need it to send session.claim and (optionally) session.abort.
         //    payment.html will open its own socket, and home.html re-opens the
         //    long-lived one when we go idle.
-        const ws = new WebSocket(
-          window.smartdoctor.backendWsUrl(
-            "/plugin?serial=" + encodeURIComponent(serialNumber),
-          ),
-        );
+        const ws = new WebSocket(window.smartdoctor.pluginWsUrl(serialNumber));
         let heartbeatTimer = null;
 
         ws.onopen = () => {
