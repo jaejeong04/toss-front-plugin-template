@@ -1,0 +1,45 @@
+{
+  "clientRequestId": "crm-test-0001",
+  "deviceSerialNumber": "TF-TEST-0001",
+  "workstationId": "ws-test-0001",
+  "crmOrigin": {
+    "hospitalId": "99995",
+    "organizationId": "99999997",
+    "customerNumber": "411160",
+    "insuranceSeqNo": 1,
+    "medicalClinicSeqNo": 42,
+    "reservationSeqNo": null,
+    "customerName": "테스트"
+  },
+  "amount": {
+    "supplyValue": 27273,
+    "tax": 2727,
+    "tip": 0
+  },
+  "pointAccrualTargetAmount": 20000,
+  "orderSnapshot": {
+    "items": [
+      {
+        "label": "진료비 (테스트)",
+        "value": 30000,
+        "quantity": 1
+      }
+    ],
+    "discounts": [],
+    "summary": {
+      "totalAmount": 30000,
+      "earned": {
+        "label": "이번 결제 적립",
+        "value": 0,
+        "suffix": "캐시"
+      }
+    }
+  },
+  "pointContext": {
+    "availableBalance": 999999,
+    "minUseAmount": 1000,
+    "earnAmount": 0,
+    "earnLabel": "이번 결제 적립",
+    "earnSuffix": "캐시"
+  }
+}

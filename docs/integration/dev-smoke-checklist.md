@@ -30,7 +30,15 @@ Reference Python harness: `smartdoctor-api/tools/toss-payment-test/` on `feature
 - [x] CRM observes `session.result SUCCEEDED late=true` (after a prior `EXPIRED late=false` frame)
 - [x] Wall-clock to expiry recorded in findings.md (~90s)
 
-(Sections 3–4 added in subsequent tasks.)
+## 3. Refund flow (`kind: cancel`)
+
+- [x] Successful payment session captured (`sessionId` recorded)
+- [x] CRM `refund.create` triggered with that `originalSessionId`
+- [x] Plugin receives `session.dispatch` with `kind: "cancel"` and well-formed `cancelParams` (paymentMethod, tax, supplyValue, timestamp, approvalNumber populated from original)
+- [x] Plugin replies `refund.result`
+- [x] CRM observes `refund.result SUCCEEDED` with full Toss cancel response
+
+(Section 4 added in Task 10.)
 
 ## Quick repro (anyone)
 

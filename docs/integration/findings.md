@@ -41,7 +41,17 @@ Reference harness: `smartdoctor-api/tools/toss-payment-test/{plugin,crm}_client.
 
 ## Refund (`kind: cancel`)
 
-(Pending Task 9.)
+- **Status:** ✅ pass
+- **Test:** Drove a fresh happy-path session (sessionId `bef06976-…`), then sent `refund.create` over a one-off CRM WS connection with that `originalSessionId`.
+- **`cancelParams` from backend `session.dispatch (kind=cancel)`:**
+  - `paymentKey: bef06976-…` (matches original) ✓
+  - `paymentMethod: "CARD"` ✓
+  - `tax: 2727`, `supplyValue: 27273`, `tip: 0` (post-point — same as the chargeContext we sent on the original session) ✓
+  - `timestamp: 1777512422214`, `approvalNumber: "30021105"` (from original Toss SUCCESS response, persisted by backend) ✓
+  - `installment: 0`, `timeoutMs: 60000`, `localeCode: "ko"` ✓
+- **Plugin response:** `refund.result {refundId: 716e0b6c-…, tossResponse: SUCCESS}` (mock approvalNumber `30021106`).
+- **CRM-side `refund.result`:** `{status: "SUCCEEDED", refundId, originalSessionId, tossResponse: {full new card SUCCESS}}` ✓
+- **Action:** None. Backend correctly builds cancel params from persisted state and round-trips the response. The contract is solid.
 
 ## 100% 메디캐시 (`tossResponse: null`)
 
