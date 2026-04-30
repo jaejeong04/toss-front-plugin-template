@@ -231,6 +231,24 @@
               submit: { onClick: () => showOrderPage(usableCash) }, // 전액 사용
               cancel: { onClick: () => showOrderPage(0) }, // 사용 안 함
             },
+            // Same pattern as renderOrderPage's onBack above: session is
+            // mid-flight (IN_PROGRESS), so abort the session before going
+            // idle. Without this, the back-arrow leaves a blank WebView
+            // that requires a device reboot to clear.
+            onBack: () => {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(
+                  JSON.stringify({
+                    type: "session.abort",
+                    payload: { sessionId, reason: "USER_BACKED_OUT" },
+                  }),
+                );
+                ws.close();
+              }
+              sessionStorage.removeItem("smartdoctor.dispatch");
+              sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
+              sdk.app.setIdle();
+            },
           });
         } else {
           showOrderPage(0);
