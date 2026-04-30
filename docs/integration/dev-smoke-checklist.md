@@ -38,7 +38,12 @@ Reference Python harness: `smartdoctor-api/tools/toss-payment-test/` on `feature
 - [x] Plugin replies `refund.result`
 - [x] CRM observes `refund.result SUCCEEDED` with full Toss cancel response
 
-(Section 4 added in Task 10.)
+## 4. 100% 메디캐시 (charged=0, tossResponse: null)
+
+- [x] CRM session.create with explicit `pointContext.availableBalance: 999999` (override, since dev customer 411160 has zero medicash)
+- [x] Plugin sends `session.chargeContext` with zero charged amounts and full point use
+- [x] Plugin sends `session.result` with `tossResponse: null`
+- [ ] ❌ Backend accepts (no `error` frame); CRM observes SUCCEEDED — **FAIL.** Backend closed plugin WS with code 1011 (internal error). See `findings.md` for repro and recommended fix.
 
 ## Quick repro (anyone)
 

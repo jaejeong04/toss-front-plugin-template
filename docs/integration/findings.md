@@ -55,4 +55,22 @@ Reference harness: `smartdoctor-api/tools/toss-payment-test/{plugin,crm}_client.
 
 ## 100% 메디캐시 (`tossResponse: null`)
 
-(Pending Task 10.)
+- **Status:** ❌ **FAIL — backend crashes on `tossResponse: null`**
+- **Test:** Drove a session with explicit `pointContext.availableBalance: 999999` (so backend skips auto-enrichment), plugin replied with `session.result {pointUseAmount: 30000, chargedSupplyValue: 0, chargedTax: 0, tossResponse: null}`.
+- **Observed sequence (plugin side):**
+  1. `device.registered` ✅
+  2. `session.dispatch` with our explicit `pointContext` passed through verbatim (good — backend honored "CRM이 명시적으로 넘긴 pointContext는 그대로 저장하고 plugin에 전달한다") ✅
+  3. Plugin sent claim → chargeContext → result with `tossResponse: null` ✅
+  4. Backend: `session.status IN_PROGRESS` (acknowledged claim) ✅
+  5. Backend sent **WS close 1011 ("internal error")** immediately after receiving `session.result {tossResponse: null}` ❌
+- **Diagnosis:** WS 1011 is a server-side unhandled exception, not a validation rejection. Backend's `session.result` handler does not handle `tossResponse: null`.
+- **Spec context:**
+  - FE spec `2026-04-27-frontend-plugin.md` says: when `charged === 0` (treatment fully covered by medicash), plugin skips `requestPayment` and sends `session.result` with `tossResponse: null`. FE commit `cbcc11d` (2026-04-29) implements this.
+  - Backend deployed-flow doc `toss-payment-flow.md` §6 example shows `tossResponse` always populated. The null path is not specified.
+  - The two specs disagree. FE behavior follows its spec; backend lacks corresponding handling.
+- **Recommended backend fix (any of):**
+  1. Accept `tossResponse: null` in `session.result` payload, treat as POINTS_ONLY: mark session SUCCEEDED, set `toss_payment_method = null`, forward `tossResponse: null` to CRM.
+  2. Define a sentinel shape (e.g. `tossResponse: { type: "POINTS_ONLY", response: null }`) and update FE to send that instead.
+  3. Update both specs to align on whichever choice.
+- **FE-side action (if backend picks option 2):** Trivial change in [front-plugin-js/payment.html:108-118](../../front-plugin-js/payment.html) — replace `tossResponse: null` with the agreed sentinel.
+- **Action: file with backend in Slack thread `C099YT4CL75`.** Reproduce: `python3 tools/100pct-medicash-test.py --token crm_qalmighty` against deployed dev with the override JSON.
