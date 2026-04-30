@@ -4,6 +4,25 @@ Captured during dev smoke testing on 2026-04-30 against `wss://develop.api.core.
 
 Reference harness: `smartdoctor-api/tools/toss-payment-test/{plugin,crm}_client.py` (feature/toss-payment branch).
 
+## Summary
+
+| Flow | Status | Notes |
+|---|---|---|
+| WS handshake | ✅ pass | After host correction (openapi → core); FE config fixed in commit `cb85f03` |
+| Happy path (CRM session.create → SUCCEEDED) | ✅ pass | Full Toss response forwarded to CRM; auto-pointContext enrichment works |
+| Reconcile recovery (`late: true`) | ✅ pass | ~90s expiry, `session.reconcile` arrives, late SUCCEEDED forwarded |
+| Refund (`kind: cancel`) | ✅ pass | `cancelParams` correctly built from persisted Toss fields |
+| 100% 메디캐시 (`tossResponse: null`) | ❌ **FAIL** | Backend WS 1011 crash; session poisoned IN_PROGRESS. Backend fix needed. |
+
+**Wire contract:** verified end-to-end. The FE wire fixes (commits `742bf07` → `cb85f03`) land cleanly against deployed dev.
+
+**Outstanding production work:**
+- Backend must handle `tossResponse: null` in `session.result` (or coordinate a sentinel shape with FE).
+- `CORE_TOKEN` is hardcoded in [front-plugin-js/config.js:14](../../front-plugin-js/config.js); production token-fetch flow TBD (TODO comment in place).
+- Open questions from spec §15 (trust model for unknown serials, `merchant.id` wire path) not addressed by this work.
+
+
+
 ## Pre-flight (WS handshake)
 
 - **Status:** ✅ pass (after host correction)
@@ -63,7 +82,9 @@ Reference harness: `smartdoctor-api/tools/toss-payment-test/{plugin,crm}_client.
   3. Plugin sent claim → chargeContext → result with `tossResponse: null` ✅
   4. Backend: `session.status IN_PROGRESS` (acknowledged claim) ✅
   5. Backend sent **WS close 1011 ("internal error")** immediately after receiving `session.result {tossResponse: null}` ❌
+- **CRM-side observed (Terminal B):** `session.ack` → `session.status DISPATCHED` → `session.status IN_PROGRESS` → **then nothing** (only heartbeat pongs). No terminal `session.result`, no `error` frame. The session is stuck IN_PROGRESS on the backend side from CRM's perspective.
 - **Diagnosis:** WS 1011 is a server-side unhandled exception, not a validation rejection. Backend's `session.result` handler does not handle `tossResponse: null`.
+- **Severity bump:** This isn't only a happy-path-rejection bug. The crash poisons the session — backend persists the session as IN_PROGRESS, watchdog will eventually expire it (~90s, per Task 8), and on reconcile the plugin would replay the same `tossResponse: null` payload and trigger the same crash. **Sessions in this state cannot resolve cleanly via the existing recovery flow.**
 - **Spec context:**
   - FE spec `2026-04-27-frontend-plugin.md` says: when `charged === 0` (treatment fully covered by medicash), plugin skips `requestPayment` and sends `session.result` with `tossResponse: null`. FE commit `cbcc11d` (2026-04-29) implements this.
   - Backend deployed-flow doc `toss-payment-flow.md` §6 example shows `tossResponse` always populated. The null path is not specified.
