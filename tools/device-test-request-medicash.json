@@ -1,5 +1,5 @@
 {
-  "clientRequestId": "device-test-0001",
+  "clientRequestId": "device-test-medicash-0001",
   "deviceSerialNumber": "258F2010SLR0040",
   "workstationId": "ws-dev-jj-001",
   "crmOrigin": {
@@ -17,10 +17,17 @@
     "tip": 0
   },
   "pointAccrualTargetAmount": 0,
+  "pointContext": {
+    "availableBalance": 500,
+    "minUseAmount": 100,
+    "earnAmount": 0,
+    "earnLabel": "이번 결제 적립",
+    "earnSuffix": "캐시"
+  },
   "orderSnapshot": {
     "items": [
       {
-        "label": "디바이스 통합 테스트",
+        "label": "디바이스 통합 테스트 (메디캐시)",
         "value": 1000,
         "quantity": 1
       }

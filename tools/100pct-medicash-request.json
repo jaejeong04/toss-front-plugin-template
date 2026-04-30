@@ -7,7 +7,7 @@
     "organizationId": "99999997",
     "customerNumber": "411160",
     "insuranceSeqNo": 1,
-    "medicalClinicSeqNo": 42,
+    "clinicSeqNo": 42,
     "reservationSeqNo": null,
     "customerName": "테스트"
   },
