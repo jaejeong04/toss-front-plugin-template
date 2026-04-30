@@ -205,6 +205,12 @@
                 closeOnClick: true,
               },
             ],
+            // Session terminal at this point — back-arrow just escapes
+            // to OS idle. Without this, a back-tap on the success
+            // screen blanks the WebView (see also: timeout/cancel page
+            // bug fix in this commit). All terminal renders get the
+            // same onBack.
+            onBack: () => sdk.app.setIdle(),
             localeCode: "ko",
           });
         } else {
@@ -275,6 +281,11 @@
                 });
               },
             },
+            // Back-arrow on this failure/timeout page was the original
+            // device-bricking bug — SDK dismisses its overlay leaving
+            // a blank WebView. Session is already terminal (CANCELED/
+            // TIMEOUT recorded by backend); just escape to OS idle.
+            onBack: () => sdk.app.setIdle(),
           });
         }
       }
@@ -319,6 +330,12 @@
                 closeOnClick: true,
               },
             ],
+            // Session terminal at this point — back-arrow just escapes
+            // to OS idle. Without this, a back-tap on the success
+            // screen blanks the WebView (see also: timeout/cancel page
+            // bug fix in this commit). All terminal renders get the
+            // same onBack.
+            onBack: () => sdk.app.setIdle(),
             localeCode: "ko",
           });
         } else {
@@ -358,6 +375,12 @@
               text: "확인",
               onClick: () => sdk.app.setIdle(),
             },
+            // Session terminal at this point — back-arrow just escapes
+            // to OS idle. Without this, a back-tap on the failure
+            // screen blanks the WebView (see also: timeout/cancel page
+            // bug fix in this commit). All terminal renders get the
+            // same onBack.
+            onBack: () => sdk.app.setIdle(),
           });
         }
       }
