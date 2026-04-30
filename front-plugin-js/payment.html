@@ -264,27 +264,15 @@
               },
             },
             cta: {
-              text: "다시 결제하기",
-              // Re-enter the live path. The original dispatch + the
-              // sessionStorage-stashed pointUse — wait, we removed it in
-              // step 8. Re-stash before retry so step 1 reads it again.
+              text: "확인",
+              // No retry CTA: backend already terminalized this session
+              // when we sent session.result above. Re-trying would re-send
+              // chargeContext for a session backend has discarded. CRM
+              // must initiate a new session.create for retries (one
+              // session = one payment attempt per spec). Navigate back to
+              // home.html which re-mounts the dispatcher.
               onClick: () => {
-                sessionStorage.setItem(
-                  "smartdoctor.dispatch",
-                  JSON.stringify(dispatch),
-                );
-                sessionStorage.setItem(
-                  "smartdoctor.dispatch.pointUse",
-                  String(pointUse),
-                );
-                // Open a fresh WS for the retry — the prior one is closed.
-                runFreshFlow().catch((err) => {
-                  console.error(
-                    "[smartdoctor] payment.html retry fatal",
-                    err,
-                  );
-                  sdk.app.setIdle();
-                });
+                location.href = "./home.html";
               },
             },
             // Back-arrow on this failure/timeout page was the original
