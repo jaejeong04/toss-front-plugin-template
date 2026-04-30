@@ -134,6 +134,12 @@
                 closeOnClick: true,
               },
             ],
+            // Session terminal at this point — back-arrow just escapes
+            // to OS idle. Without this, a back-tap on the success
+            // screen blanks the WebView (see also: timeout/cancel page
+            // bug fix in this commit). All terminal renders get the
+            // same onBack.
+            onBack: () => sdk.app.setIdle(),
             localeCode: "ko",
           });
           return;
