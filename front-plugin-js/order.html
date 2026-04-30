@@ -51,7 +51,7 @@
           dispatch.kind !== "payment" ||
           dispatch.sessionId !== sessionId
         ) {
-          sdk.app.setIdle();
+          location.href = "./home.html";
           return;
         }
 
@@ -207,7 +207,7 @@
               // on the next dispatch anyway, but cleaning up here is cheap.
               sessionStorage.removeItem("smartdoctor.dispatch");
               sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
-              sdk.app.setIdle();
+              location.href = "./home.html";
             },
           });
         }
@@ -247,7 +247,7 @@
               }
               sessionStorage.removeItem("smartdoctor.dispatch");
               sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
-              sdk.app.setIdle();
+              location.href = "./home.html";
             },
           });
         } else {
@@ -257,7 +257,7 @@
 
       main().catch((err) => {
         console.error("[smartdoctor] order.html fatal", err);
-        sdk.app.setIdle();
+        location.href = "./home.html";
       });
     </script>
   </body>
