@@ -40,219 +40,258 @@
         //    registers test devices on the partner-portal side.
         const { serialNumber } = await sdk.app.getSerialNumber();
 
-        // 3. Open WS B (plugin ↔ our backend). Standard browser WebSocket;
-        //    sdk.webSocket is a server namespace per spec §2.7 — not what we want.
-        const ws = new WebSocket(window.smartdoctor.pluginWsUrl(serialNumber));
-
-        let heartbeatTimer = null;
-
-        // Reconcile/recovery race guard: ws.onmessage is registered before
-        // runPendingPaymentRecovery completes, so a session.reconcile frame
-        // for the same paymentKey could race with the recovery's own
-        // session.result send. recoveryReady resolves AFTER recovery finishes
-        // (success or throw); session.reconcile awaits it before reading
-        // pending storage. recoveredSessions tracks sessionIds the helper
-        // already sent so reconcile can return early for the exact same one.
-        let resolveRecoveryReady;
-        const recoveryReady = new Promise((r) => {
-          resolveRecoveryReady = r;
-        });
+        // Reconcile/recovery dedupe: persists across reconnects so a recovery
+        // that finished pre-disconnect doesn't re-send late session.result on
+        // the next session.reconcile that arrives over a fresh socket.
         const recoveredSessions = new Set();
 
-        ws.onopen = async () => {
-          // 5. device.register — first message after connect (spec §4.3).
-          ws.send(
-            JSON.stringify({
-              type: "device.register",
-              payload: { serialNumber, sdkVersion: "v0" },
-            }),
+        // Reconnect state. Exponential backoff capped at 30s; reset on successful
+        // open. Backend close-code 4403 (unrecoverable trust failure / serial not
+        // registered) skips reconnect — partner-portal config issue, not transient.
+        let reconnectAttempt = 0;
+        let reconnectTimer = null;
+
+        function scheduleReconnect() {
+          reconnectAttempt += 1;
+          const delaySeconds = Math.min(Math.pow(2, reconnectAttempt - 1), 30);
+          console.log(
+            "[smartdoctor] home.html reconnect attempt",
+            reconnectAttempt,
+            "in",
+            delaySeconds + "s",
           );
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connect();
+          }, delaySeconds * 1000);
+        }
 
-          // 6. Application-level heartbeat (spec §4.1). Backend tracks misses
-          //    and drops the socket after 3; plugin only sends.
-          heartbeatTimer = setInterval(() => {
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: "ping", payload: {} }));
+        function connect() {
+          // 3. Open WS B (plugin ↔ our backend). Standard browser WebSocket;
+          //    sdk.webSocket is a server namespace per spec §2.7 — not what we want.
+          const ws = new WebSocket(window.smartdoctor.pluginWsUrl(serialNumber));
+
+          let heartbeatTimer = null;
+
+          // Reconcile/recovery race guard: ws.onmessage is registered before
+          // runPendingPaymentRecovery completes, so a session.reconcile frame
+          // for the same paymentKey could race with the recovery's own
+          // session.result send. recoveryReady resolves AFTER recovery finishes
+          // (success or throw); session.reconcile awaits it before reading
+          // pending storage. Fresh promise per connection.
+          let resolveRecoveryReady;
+          const recoveryReady = new Promise((r) => {
+            resolveRecoveryReady = r;
+          });
+
+          ws.onopen = async () => {
+            // Successful connect → reset backoff so the next disconnect starts
+            // from delay 1s, not whatever we'd escalated to before.
+            reconnectAttempt = 0;
+
+            // 5. device.register — first message after connect (spec §4.3).
+            ws.send(
+              JSON.stringify({
+                type: "device.register",
+                payload: { serialNumber, sdkVersion: "v0" },
+              }),
+            );
+
+            // 6. Application-level heartbeat (spec §4.1). Backend tracks misses
+            //    and drops the socket after 3; plugin only sends.
+            heartbeatTimer = setInterval(() => {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "ping", payload: {} }));
+              }
+            }, HEARTBEAT_MS);
+
+            // 9. Pending-payment recovery (spec §5). The helper no-ops when
+            //    there's no pending entry; pass the open ws so a recovered
+            //    session.result can be sent. The try/finally is load-bearing —
+            //    if recovery throws, recoveryReady must still resolve so the
+            //    session.reconcile handler doesn't deadlock.
+            try {
+              const recovered =
+                await window.smartdoctor.runPendingPaymentRecovery({ ws });
+              if (recovered && recovered.sessionId) {
+                recoveredSessions.add(recovered.sessionId);
+              }
+            } finally {
+              resolveRecoveryReady();
             }
-          }, HEARTBEAT_MS);
+          };
 
-          // 9. Pending-payment recovery (spec §5). The helper no-ops when
-          //    there's no pending entry; pass the open ws so a recovered
-          //    session.result can be sent. The try/finally is load-bearing —
-          //    if recovery throws, recoveryReady must still resolve so the
-          //    session.reconcile handler doesn't deadlock.
-          try {
-            const recovered =
-              await window.smartdoctor.runPendingPaymentRecovery({ ws });
-            if (recovered && recovered.sessionId) {
-              recoveredSessions.add(recovered.sessionId);
-            }
-          } finally {
-            resolveRecoveryReady();
-          }
-        };
+          // 7. Inbound dispatcher (spec §4.2). The whole body is wrapped in
+          //    try/catch so a JSON.parse / SDK rejection doesn't surface as a
+          //    silent unhandled rejection. The inner try/catch around
+          //    sdk.payment.getPayment (PAYMENT_NOT_FOUND swallow) is preserved.
+          ws.onmessage = async (ev) => {
+            try {
+              const msg = JSON.parse(ev.data);
 
-        // 7. Inbound dispatcher (spec §4.2). The whole body is wrapped in
-        //    try/catch so a JSON.parse / SDK rejection doesn't surface as a
-        //    silent unhandled rejection. The inner try/catch around
-        //    sdk.payment.getPayment (PAYMENT_NOT_FOUND swallow) is preserved.
-        ws.onmessage = async (ev) => {
-          try {
-            const msg = JSON.parse(ev.data);
-
-            switch (msg.type) {
-              case "device.registered": {
-                // Ack — log only.
-                console.log("[smartdoctor] device.registered", msg.payload);
-                return;
-              }
-
-              case "pong": {
-                // Informational. Backend tracks misses; plugin does not.
-                return;
-              }
-
-              case "session.dispatch": {
-                const payload = msg.payload || {};
-                // Stash the full dispatch payload so the next page can read it
-                // without a separate backend fetch (spec §6.1, §6.2).
-                sessionStorage.setItem(
-                  "smartdoctor.dispatch",
-                  JSON.stringify(payload),
-                );
-                if (payload.kind === "payment") {
-                  location.href = "./order.html#" + payload.sessionId;
-                } else if (payload.kind === "cancel") {
-                  // Cancel flow lives in payment.html; order.html is fresh-payment-only.
-                  location.href = "./payment.html#" + payload.refundId;
-                } else {
-                  console.warn(
-                    "[smartdoctor] session.dispatch unknown kind",
-                    payload.kind,
-                  );
-                }
-                return;
-              }
-
-              case "session.reconcile": {
-                // Spec §4.2: backend suspects an EXPIRED session may actually have
-                // succeeded on the device. Look it up locally; only respond on
-                // success. PAYMENT_NOT_FOUND → send nothing.
-                const paymentKey = msg.payload && msg.payload.paymentKey;
-                const sessionId = msg.payload && msg.payload.sessionId;
-
-                // Wait for runPendingPaymentRecovery (kicked off in ws.onopen)
-                // to finish before touching pending storage. Otherwise this
-                // handler and the recovery helper can both hit the same
-                // pending entry and double-send session.result for the same
-                // paymentKey.
-                await recoveryReady;
-                if (recoveredSessions.has(sessionId)) {
-                  // Recovery helper already sent session.result for this exact
-                  // sessionId; backend would just see a duplicate.
+              switch (msg.type) {
+                case "device.registered": {
+                  // Ack — log only.
+                  console.log("[smartdoctor] device.registered", msg.payload);
                   return;
                 }
 
-                // Try to enrich with the locally-stashed pending-payment amounts;
-                // backend falls back to its own session.chargeContext if these
-                // are null.
-                let pointUseAmount = null;
-                let chargedSupplyValue = null;
-                let chargedTax = null;
-                const { value: pendingJson } = await sdk.storage.get({
-                  key: window.smartdoctor.PENDING_KEY,
-                });
-                if (pendingJson) {
-                  const pending = JSON.parse(pendingJson);
-                  if (pending && pending.paymentKey === paymentKey) {
-                    pointUseAmount = pending.pointUseAmount ?? null;
-                    chargedSupplyValue = pending.chargedSupplyValue ?? null;
-                    chargedTax = pending.chargedTax ?? null;
-                  }
+                case "pong": {
+                  // Informational. Backend tracks misses; plugin does not.
+                  return;
                 }
 
-                try {
-                  const result = await sdk.payment.getPayment({ paymentKey });
-                  if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(
-                      JSON.stringify({
-                        type: "session.result",
-                        payload: {
-                          sessionId,
-                          pointUseAmount,
-                          chargedSupplyValue,
-                          chargedTax,
-                          tossResponse: result,
-                          late: true,
-                        },
-                      }),
+                case "session.dispatch": {
+                  const payload = msg.payload || {};
+                  // Stash the full dispatch payload so the next page can read it
+                  // without a separate backend fetch (spec §6.1, §6.2).
+                  sessionStorage.setItem(
+                    "smartdoctor.dispatch",
+                    JSON.stringify(payload),
+                  );
+                  if (payload.kind === "payment") {
+                    location.href = "./order.html#" + payload.sessionId;
+                  } else if (payload.kind === "cancel") {
+                    // Cancel flow lives in payment.html; order.html is fresh-payment-only.
+                    location.href = "./payment.html#" + payload.refundId;
+                  } else {
+                    console.warn(
+                      "[smartdoctor] session.dispatch unknown kind",
+                      payload.kind,
                     );
                   }
-                } catch (e) {
-                  // PAYMENT_NOT_FOUND is the documented expected outcome — spec
-                  // mandates "send nothing", so we explicitly swallow it. Any
-                  // other error: log; backend keeps the session in EXPIRED.
-                  // TODO(verify-error-shape): SDK error shape isn't publicly documented — verify on real device.
-                  if (e && e.code === "PAYMENT_NOT_FOUND") {
+                  return;
+                }
+
+                case "session.reconcile": {
+                  // Spec §4.2: backend suspects an EXPIRED session may actually have
+                  // succeeded on the device. Look it up locally; only respond on
+                  // success. PAYMENT_NOT_FOUND → send nothing.
+                  const paymentKey = msg.payload && msg.payload.paymentKey;
+                  const sessionId = msg.payload && msg.payload.sessionId;
+
+                  // Wait for runPendingPaymentRecovery (kicked off in ws.onopen)
+                  // to finish before touching pending storage. Otherwise this
+                  // handler and the recovery helper can both hit the same
+                  // pending entry and double-send session.result for the same
+                  // paymentKey.
+                  await recoveryReady;
+                  if (recoveredSessions.has(sessionId)) {
+                    // Recovery helper already sent session.result for this exact
+                    // sessionId; backend would just see a duplicate.
                     return;
                   }
-                  console.warn("[smartdoctor] session.reconcile error", e);
+
+                  // Try to enrich with the locally-stashed pending-payment amounts;
+                  // backend falls back to its own session.chargeContext if these
+                  // are null.
+                  let pointUseAmount = null;
+                  let chargedSupplyValue = null;
+                  let chargedTax = null;
+                  const { value: pendingJson } = await sdk.storage.get({
+                    key: window.smartdoctor.PENDING_KEY,
+                  });
+                  if (pendingJson) {
+                    const pending = JSON.parse(pendingJson);
+                    if (pending && pending.paymentKey === paymentKey) {
+                      pointUseAmount = pending.pointUseAmount ?? null;
+                      chargedSupplyValue = pending.chargedSupplyValue ?? null;
+                      chargedTax = pending.chargedTax ?? null;
+                    }
+                  }
+
+                  try {
+                    const result = await sdk.payment.getPayment({ paymentKey });
+                    if (ws.readyState === WebSocket.OPEN) {
+                      ws.send(
+                        JSON.stringify({
+                          type: "session.result",
+                          payload: {
+                            sessionId,
+                            pointUseAmount,
+                            chargedSupplyValue,
+                            chargedTax,
+                            tossResponse: result,
+                            late: true,
+                          },
+                        }),
+                      );
+                    }
+                  } catch (e) {
+                    // PAYMENT_NOT_FOUND is the documented expected outcome — spec
+                    // mandates "send nothing", so we explicitly swallow it. Any
+                    // other error: log; backend keeps the session in EXPIRED.
+                    // TODO(verify-error-shape): SDK error shape isn't publicly documented — verify on real device.
+                    if (e && e.code === "PAYMENT_NOT_FOUND") {
+                      return;
+                    }
+                    console.warn("[smartdoctor] session.reconcile error", e);
+                  }
+                  return;
                 }
-                return;
-              }
 
-              case "session.abort": {
-                // Spec §4.2: stop rendering order/point page and return to idle.
-                // From home.html we are already idle; setIdle() defensively.
-                // Do NOT call requestPayment.
-                console.log("[smartdoctor] session.abort", msg.payload);
-                sdk.app.setIdle();
-                return;
-              }
+                case "session.abort": {
+                  // Spec §4.2: stop rendering order/point page and return to idle.
+                  // From home.html we are already idle; setIdle() defensively.
+                  // Do NOT call requestPayment.
+                  console.log("[smartdoctor] session.abort", msg.payload);
+                  sdk.app.setIdle();
+                  return;
+                }
 
-              case "error": {
-                const p = msg.payload || {};
-                console.warn(
-                  "[smartdoctor] backend error",
-                  p.code,
-                  p.message,
-                  p.sessionId,
-                );
-                return;
-              }
+                case "error": {
+                  const p = msg.payload || {};
+                  console.warn(
+                    "[smartdoctor] backend error",
+                    p.code,
+                    p.message,
+                    p.sessionId,
+                  );
+                  return;
+                }
 
-              default: {
-                console.warn("[smartdoctor] unknown ws message", msg.type, msg);
-                return;
+                default: {
+                  console.warn("[smartdoctor] unknown ws message", msg.type, msg);
+                  return;
+                }
               }
+            } catch (e) {
+              // Outer guard: anything thrown above (JSON.parse, SDK rejection,
+              // storage failure, etc.) would otherwise become a silent
+              // unhandled rejection. Log and move on.
+              console.warn("[smartdoctor] ws message handler failed", e);
             }
-          } catch (e) {
-            // Outer guard: anything thrown above (JSON.parse, SDK rejection,
-            // storage failure, etc.) would otherwise become a silent
-            // unhandled rejection. Log and move on.
-            console.warn("[smartdoctor] ws message handler failed", e);
-          }
-        };
+          };
 
-        // 8. On close — clear heartbeat, log, no auto-reconnect (Toss's lifecycle
-        //    will reopen the plugin). Backend rejection of an unregistered
-        //    serial is a partner-portal config problem, not something the
-        //    plugin can recover from — just log the close code.
-        ws.onclose = (ev) => {
-          if (heartbeatTimer != null) {
-            clearInterval(heartbeatTimer);
-            heartbeatTimer = null;
-          }
-          console.log(
-            "[smartdoctor] ws closed",
-            "code=" + ev.code,
-            "reason=" + ev.reason,
-          );
-        };
+          // 8. On close — clear heartbeat, log, schedule reconnect unless backend
+          //    rejected the serial outright (close code 4403). The reconnect
+          //    re-runs ws.onopen which re-issues device.register + heartbeat +
+          //    runPendingPaymentRecovery, restoring the dispatcher.
+          ws.onclose = (ev) => {
+            if (heartbeatTimer != null) {
+              clearInterval(heartbeatTimer);
+              heartbeatTimer = null;
+            }
+            console.log(
+              "[smartdoctor] ws closed",
+              "code=" + ev.code,
+              "reason=" + ev.reason,
+            );
+            if (ev.code === 4403) {
+              console.warn(
+                "[smartdoctor] backend rejected serial (4403); not reconnecting",
+              );
+              return;
+            }
+            scheduleReconnect();
+          };
 
-        ws.onerror = (ev) => {
-          console.warn("[smartdoctor] ws error", ev);
-        };
+          ws.onerror = (ev) => {
+            console.warn("[smartdoctor] ws error", ev);
+          };
+        }
+
+        connect();
       }
 
       main();
