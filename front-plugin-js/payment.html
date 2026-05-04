@@ -72,6 +72,13 @@
         }
       }
 
+      // N-1: Guard condition helper — avoids repeating the compound check
+      // at every guard site. ref.current is set by the WS onmessage handler.
+      // A missing sessionId on the payload means "global error, always matches".
+      function isBackendErrorForSession(ref, sessionId) {
+        return ref.current && (ref.current.sessionId === sessionId || !ref.current.sessionId);
+      }
+
       // Renders a terminal error page using a backend error payload.
       // Both timer and button route to home.html. No custom HTML — uses
       // sdk.template.renderResultPage exclusively. Per spec §11.
@@ -92,6 +99,10 @@
               closeOnClick: true,
             },
           ],
+          // N-2: match every other terminal renderResultPage call in this
+          // file — localeCode and onBack prevent a blank WebView on back-tap.
+          onBack: () => { location.href = "./home.html"; },
+          localeCode: "ko",
         });
       }
 
@@ -129,6 +140,18 @@
         //     chargedTax === 0 AND tossResponse === null, treat as a points-only
         //     payment (no card/cash transaction occurred).
         if (charged === 0) {
+          // IM-2: guard between chargeContext and session.result. If backend
+          // rejected the chargeContext we must not send session.result to a
+          // discarded session and must not render a false success. Synchronous
+          // JS between the two sendWs calls means no microtask ran between
+          // them, but error frames queued before chargeContext may already be
+          // in backendErrorRef. Explicit check makes behavior consistent with
+          // all other paths.
+          if (isBackendErrorForSession(backendErrorRef, dispatch.sessionId)) {
+            closeWs(ws);
+            await renderBackendErrorPage(backendErrorRef.current);
+            return;
+          }
           sendWs(ws, {
             type: "session.result",
             payload: {
@@ -190,7 +213,10 @@
         // session — error frame arrived between chargeContext send and this point.
         // Without this guard the real card would be charged on a session backend
         // has already discarded. Real-money critical. Per spec §11 (toss-payment-flow.md).
-        if (backendErrorRef.current && (backendErrorRef.current.sessionId === dispatch.sessionId || !backendErrorRef.current.sessionId)) {
+        if (isBackendErrorForSession(backendErrorRef, dispatch.sessionId)) {
+          // IM-1: close ws before rendering error page so heartbeat timer
+          // stops pinging a backend that already errored.
+          closeWs(ws);
           await renderBackendErrorPage(backendErrorRef.current);
           return;
         }
@@ -204,6 +230,19 @@
           localeCode: "ko",
           excludePaymentTypes: ["CASH"],
         });
+
+        // RC-1: post-await re-check. An error frame that arrived DURING the
+        // requestPayment call (user held the terminal for minutes) is now in
+        // backendErrorRef. If we don't check here we'd send session.result to
+        // a session backend has already discarded and render a stale page.
+        // Clean up pending storage first so recovery on home.html doesn't
+        // re-attempt a session that's already gone.
+        if (isBackendErrorForSession(backendErrorRef, dispatch.sessionId)) {
+          await sdk.storage.remove({ key: window.smartdoctor.PENDING_KEY });
+          closeWs(ws);
+          await renderBackendErrorPage(backendErrorRef.current);
+          return;
+        }
 
         // 6. Remove pendingPayment AFTER requestPayment resolves — we now
         //    have the live result and can post it directly.
@@ -325,7 +364,10 @@
         // Bail if backend rejected the session before we hit the SDK.
         // Refund doesn't carry the same real-money charge risk (it's a
         // reverse), but spec §11 compliance + consistent error surfacing.
-        if (backendErrorRef.current && (backendErrorRef.current.sessionId === dispatch.sessionId || !backendErrorRef.current.sessionId)) {
+        if (isBackendErrorForSession(backendErrorRef, dispatch.sessionId)) {
+          // IM-1: close ws before rendering error page so heartbeat timer
+          // stops pinging a backend that already errored.
+          closeWs(ws);
           await renderBackendErrorPage(backendErrorRef.current);
           return;
         }
@@ -333,6 +375,17 @@
         const result = await sdk.payment.requestPaymentCancel(
           dispatch.cancelParams,
         );
+
+        // RC-1: post-await re-check. An error frame that arrived DURING the
+        // requestPaymentCancel call is now in backendErrorRef. If we don't
+        // check here we'd send refund.result to a discarded session and
+        // render a stale page. No PENDING_KEY to remove on the cancel path
+        // (storage write only happens in runPayment).
+        if (isBackendErrorForSession(backendErrorRef, dispatch.sessionId)) {
+          closeWs(ws);
+          await renderBackendErrorPage(backendErrorRef.current);
+          return;
+        }
 
         // 2. refund.result over WS. Spec §4.3.
         sendWs(ws, {
