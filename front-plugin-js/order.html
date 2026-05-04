@@ -102,7 +102,7 @@
         // instead of closing with 1011. Also handles `session.abort` sent while
         // the user is mid-flow on this page. Both cases: surface the reason via
         // toast and navigate to home.html, which re-mounts the idle dispatcher.
-        ws.onmessage = (ev) => {
+        ws.onmessage = async (ev) => {
           try {
             const msg = JSON.parse(ev.data);
 
@@ -115,8 +115,9 @@
               case "session.abort": {
                 // Backend or CRM aborted the session while user is on the
                 // use-points/order page. Surface it and return to idle.
+                ws.onmessage = null;
                 console.log("[smartdoctor] order.html session.abort", msg.payload);
-                sdk.template.openToast({ message: "세션이 종료되었어요", icon: "error" });
+                await sdk.template.openToast({ message: "세션이 종료되었어요", icon: "error" });
                 location.href = "./home.html";
                 return;
               }
@@ -124,6 +125,7 @@
               case "error": {
                 // Spec §11: graceful error frame replacing WS 1011 close.
                 // Codes: INVALID_REQUEST | INVALID_STATE | UPSTREAM_ERROR | INTERNAL_ERROR
+                ws.onmessage = null;
                 const p = msg.payload || {};
                 console.warn(
                   "[smartdoctor] order.html backend error",
@@ -132,7 +134,7 @@
                   p.sessionId,
                 );
                 const reason = p.message || p.code || "알 수 없는 오류";
-                sdk.template.openToast({ message: `오류가 발생했어요: ${reason}`, icon: "error" });
+                await sdk.template.openToast({ message: `오류가 발생했어요: ${reason}`, icon: "error" });
                 location.href = "./home.html";
                 return;
               }
