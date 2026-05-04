@@ -72,9 +72,32 @@
         }
       }
 
+      // Renders a terminal error page using a backend error payload.
+      // Both timer and button route to home.html. No custom HTML — uses
+      // sdk.template.renderResultPage exclusively. Per spec §11.
+      async function renderBackendErrorPage(payload) {
+        const reason = (payload && (payload.message || payload.code)) || "알 수 없는 오류";
+        const description = `${reason}\n잠시 후 다시 시도해 주세요`;
+        await sdk.template.renderResultPage({
+          type: "image",
+          status: "error",
+          title: "결제를 진행할 수 없어요",
+          description,
+          timerMs: 5000,
+          onTimeout: () => { location.href = "./home.html"; },
+          buttons: [
+            {
+              label: "확인",
+              onClick: () => { location.href = "./home.html"; },
+              closeOnClick: true,
+            },
+          ],
+        });
+      }
+
       // ── PAYMENT FLOW ────────────────────────────────────────────────
       // Spec §6.2. dispatch.kind === "payment".
-      async function runPayment(ws, dispatch) {
+      async function runPayment(ws, dispatch, backendErrorRef) {
         // 1. pointUse from order.html. Falsy/NaN → 0.
         const pointUse =
           Number(sessionStorage.getItem("smartdoctor.dispatch.pointUse")) || 0;
@@ -162,6 +185,16 @@
         // 5. Request payment. Spec §2.1 / §7: cash excluded literally.
         //    The SDK returns {type: "SUCCESS"|"CANCELED"|"TIMEOUT"} — failure
         //    is a value, not a throw, so no try/catch needed for branching.
+
+        // Bail if backend rejected our chargeContext or otherwise rejected the
+        // session — error frame arrived between chargeContext send and this point.
+        // Without this guard the real card would be charged on a session backend
+        // has already discarded. Real-money critical. Per spec §11 (toss-payment-flow.md).
+        if (backendErrorRef.current && (backendErrorRef.current.sessionId === dispatch.sessionId || !backendErrorRef.current.sessionId)) {
+          await renderBackendErrorPage(backendErrorRef.current);
+          return;
+        }
+
         const result = await sdk.payment.requestPayment({
           paymentKey: dispatch.sessionId,
           tax,
@@ -286,8 +319,17 @@
 
       // ── CANCEL / REFUND FLOW ────────────────────────────────────────
       // Spec §4.3 refund.result. dispatch.kind === "cancel".
-      async function runCancel(ws, dispatch) {
+      async function runCancel(ws, dispatch, backendErrorRef) {
         // 1. Pass cancelParams through as-is — backend constructed it.
+
+        // Bail if backend rejected the session before we hit the SDK.
+        // Refund doesn't carry the same real-money charge risk (it's a
+        // reverse), but spec §11 compliance + consistent error surfacing.
+        if (backendErrorRef.current && (backendErrorRef.current.sessionId === dispatch.sessionId || !backendErrorRef.current.sessionId)) {
+          await renderBackendErrorPage(backendErrorRef.current);
+          return;
+        }
+
         const result = await sdk.payment.requestPaymentCancel(
           dispatch.cancelParams,
         );
@@ -384,6 +426,12 @@
       // or runCancel. The `runFreshFlow` indirection lets the failure-path
       // retry button re-run boot for a fresh WS.
       async function runFreshFlow() {
+        // Tracks the most recent backend error frame (spec §11). Wrapped in
+        // an object so runPayment/runCancel (outer-scope functions) receive a
+        // live reference via their backendErrorRef parameter — a plain `let`
+        // would be captured by value at call time and miss late-arriving frames.
+        const backendErrorRef = { current: null };
+
         // 1. Hash id.
         const hashId = location.hash.slice(1);
 
@@ -425,6 +473,7 @@
               );
               return;
             case "error":
+              backendErrorRef.current = msg.payload;
               console.warn("[smartdoctor] payment.html backend error", msg.payload);
               return;
             default:
@@ -464,12 +513,12 @@
           }, HEARTBEAT_MS);
           // 6. Dispatch by kind + hash match.
           if (dispatch.kind === "payment" && dispatch.sessionId === hashId) {
-            await runPayment(ws, dispatch);
+            await runPayment(ws, dispatch, backendErrorRef);
           } else if (
             dispatch.kind === "cancel" &&
             dispatch.refundId === hashId
           ) {
-            await runCancel(ws, dispatch);
+            await runCancel(ws, dispatch, backendErrorRef);
           } else {
             closeWs(ws);
             location.href = "./home.html";
