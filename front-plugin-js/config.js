@@ -40,8 +40,7 @@ window.smartdoctor.PENDING_KEY = "smartdoctor.pendingPayment";
 window.smartdoctor.runPendingPaymentRecovery = async function ({ ws } = {}) {
   let pendingJson;
   try {
-    const res = await sdk.storage.get({ key: window.smartdoctor.PENDING_KEY });
-    pendingJson = res && res.value;
+    ({ value: pendingJson } = await sdk.storage.get({ key: window.smartdoctor.PENDING_KEY }));
   } catch (e) {
     console.warn("[smartdoctor] pending payment storage read failed", e);
     return null;

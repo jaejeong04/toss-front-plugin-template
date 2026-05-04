@@ -156,15 +156,15 @@
 
       try {
         // 시리얼 통신 속도 불러오기
-        const baudRateItem = await sdk.storage.get({ key: STORAGE_KEYS.BAUD_RATE });
-        if (baudRateItem.value) {
-          document.getElementById('baud-rate').value = baudRateItem.value;
+        const { value: baudRate } = await sdk.storage.get({ key: STORAGE_KEYS.BAUD_RATE });
+        if (baudRate) {
+          document.getElementById('baud-rate').value = baudRate;
         }
 
         // 대기 화면 매장명 표시 설정 불러오기
-        const showStoreNameItem = await sdk.storage.get({ key: STORAGE_KEYS.SHOW_STORE_NAME });
+        const { value: showStoreNameValue } = await sdk.storage.get({ key: STORAGE_KEYS.SHOW_STORE_NAME });
         // 저장된 값이 없으면 기본값 true
-        const showStoreName = showStoreNameItem.value === null ? true : showStoreNameItem.value === 'true';
+        const showStoreName = showStoreNameValue == null ? true : showStoreNameValue === 'true';
         document.getElementById('show-store-name').checked = showStoreName;
       } catch (e) {
         console.error('설정 불러오기 실패:', e);
