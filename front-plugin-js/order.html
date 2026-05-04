@@ -175,10 +175,16 @@
         // 6. Build the renderOrderPage snapshot for a given pointUse. Spec §6.2 +
         //    spec §2.3 renderOrderPage shape. Backend already populates items /
         //    discounts / summary on dispatch.orderSnapshot; we only adjust for
-        //    the chosen point use and always set paidAmount + earned.
+        //    the chosen point use and always set earned.
         //    - pointUse > 0: append "메디캐시 사용" to discounts and bump
         //      summary.discountAmount.
-        //    - Always: set summary.paidAmount = totalAmount − discountAmount.
+        //    - Always: override summary.totalAmount to the NET value
+        //      (gross − discountAmount) so the bottom CTA reflects what the
+        //      user actually pays. When pointUse === 0 discountAmount === 0,
+        //      so the formula is a no-op and the original gross stays.
+        //    - Always: drop summary.paidAmount — "낸 금액" is past-tense and
+        //      appears before payment, which is confusing, and the information
+        //      is already implicit from totalAmount + the discounts list.
         //    - Always: set summary.earned from dispatch.pointContext (the
         //      discriminated-union value:number form requires `suffix`).
         function buildOrderSnapshotWithPoints(snapshot, pointUse, pointContext) {
@@ -212,10 +218,14 @@
               }
             : baseSummary.earned;
 
+          // Defensive: destructure out any incoming paidAmount so the spread
+          // cannot re-introduce it even if backend/test fixtures ever pass one.
+          const { paidAmount: _ignored, ...baseSummaryWithoutPaidAmount } = baseSummary;
+
           const summary = {
-            ...baseSummary,
+            ...baseSummaryWithoutPaidAmount,
+            totalAmount: baseSummaryWithoutPaidAmount.totalAmount - discountAmount,
             discountAmount,
-            paidAmount: baseSummary.totalAmount - discountAmount,
             ...(earned !== undefined ? { earned } : {}),
           };
 
