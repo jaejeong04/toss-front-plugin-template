@@ -6,7 +6,7 @@
     "hospitalId": "99995",
     "organizationId": "99999997",
     "customerNumber": "411160",
-    "insuranceSeqNo": 1,
+    "insuranceSeqNo": 3,
     "clinicSeqNo": 42,
     "reservationSeqNo": null,
     "customerName": "테스트"
