@@ -1,6 +1,6 @@
 # Toss Front Plugin Backend Integration — Handoff Snapshot
 
-> **Last updated:** 2026-04-30 (mid-session, Task 19 pending real-device verification)
+> **Last updated:** 2026-05-04
 >
 > If you're a new Claude agent picking this up, read this file end-to-end first, then `findings.md`, then the plan doc. Don't propose code changes until you've confirmed understanding with the user.
 
@@ -52,19 +52,34 @@
 - Tasks 16, 18: Replaced all `sdk.app.setIdle()` calls in `order.html` + `payment.html` with `location.href = "./home.html"` (re-mounts dispatcher); removed broken "다시 결제하기" retry CTA; only `home.html`'s own `setIdle` retained (it's the only place it's correct)
 - Task 17: Added WS auto-reconnect with exponential backoff (1s → 30s cap) to `home.html`; persists `recoveredSessions` Set across reconnects
 
+**Phase C — medicash end-to-end verification + error-frame code review (Tasks 19+, 2026-05-04):**
+
+- Task 19 **DONE 2026-05-04:** Re-deployed plugin with lifecycle-fix commits; verified on real device. Mixed medicash + card payment succeeded end-to-end (sessionId `3aafbad1-be46-41d1-9848-85a8633ac54b`, approval `77799441`); immediate refund also succeeded (`0c34eab1-...`). No blank screen; lifecycle clean.
+- Task 11 **DONE:** Slack writeup sent to channel `C099YT4CL75`. Backend responded + deployed spec §11 Error Frames on 2026-04-30. Spec §6 100%-medicash path also deployed. Both crash families resolved.
+- Root cause of "Non-zero pointUseAmount" crash **corrected:** NOT a backend bug — was `crm_client.py:33-35` clobbering `organizationId` via `--hospital-id` CLI flag. Customer 411160 requires `organizationId: 99999997`; flag was overwriting it with `99995`.
+- Code review fixes (C1+C2+C3): FE error-frame handling committed in 5 commits (landed today on develop). Error frame C1 (dispatch error), C2 (claim rejected), C3 (result rejected) all handled gracefully.
+- Orphaned charge: 500원 from session `b1a2dfa0-...` acknowledged-but-unrecoverable; user accepted as minimal loss.
+
 ## What's open (in priority order)
 
-1. **Task 19 (active):** Re-deploy the plugin with the 7 lifecycle-fix commits and re-test on device. Verification ladder:
-   - Sanity: device boots, idle screen, back-arrow on order page returns to idle (not blank)
-   - Reconnect: yank network briefly, auto-reconnect should kick in
-   - Real card 1,000원 + immediate refund: payment success → 확인 → idle (no blank), refund success → 확인 → idle
-2. **Task 11:** Send Slack message to backend team (channel `C099YT4CL75`) about the 100%-medicash bug. Draft is in conversation history; key points: `tossResponse: null` → WS 1011 → session poisoned. Reproducer: `python3 tools/100pct-medicash-test.py --token crm_qalmighty`.
-3. **Deferred audit items** (in `findings.md` for tracking, not blocking): #3 zero-WS-coverage during nav, #5 stale pendingPayment cleanup, #6 recovery-without-WS, #7 unknown-kind dispatch, #9 heartbeat timer race, #10 100%-medicash close-before-flush, #11 order.html-skips-recovery, #12 home.html dispatch/recovery race.
+1. **Task 19:** ✅ **DONE 2026-05-04** — Real-device re-verification complete. Mixed medicash + card payment + refund succeeded end-to-end. Lifecycle clean (no blank screen, no DEVICE_OFFLINE).
+2. **Task 11:** ✅ **DONE** — Slack writeup sent to `C099YT4CL75`. Backend responded; spec §6 + §11 deployed 2026-04-30. Both medicash crash families resolved.
+3. **Deferred audit items** — reassessed 2026-05-04:
+   - **#4 (error-frame C1/C2/C3 handling):** ✅ **RESOLVED** — FE error-frame handling committed today (C1+C2+C3 commits landed on develop). Spec §11 deployed by backend.
+   - **#10 (100%-medicash close-before-flush):** ✅ **RESOLVED** — Backend spec §11 deploy made WS lifecycle graceful; FE error-frame handling in place.
+   - **#3 (zero-WS-coverage during nav):** still deferred — low priority given lifecycle nav fix (home.html re-mount on all transitions).
+   - **#5 (stale pendingPayment cleanup):** still deferred.
+   - **#6 (recovery-without-WS):** still deferred.
+   - **#7 (unknown-kind dispatch):** still deferred.
+   - **#9 (heartbeat timer race):** still deferred.
+   - **#11 (order.html-skips-recovery):** still deferred.
+   - **#12 (home.html dispatch/recovery race):** still deferred.
 
 ## Operational guardrails
 
 - **Real money flows through this.** If you do a payment test, cancel immediately. Use [tools/device-test-request.json](../../tools/device-test-request.json) (1,000원) — never the default `session_create_request.json` (30,000원).
-- **Don't test 100%-medicash on the device** until backend ships the null-tossResponse fix. Customer 411160 has zero medicash so accidental triggers are unlikely, but don't manually inject `pointContext.availableBalance` to force coverage.
+- **100%-medicash and mixed-medicash flows are now safe to test** — backend spec §6 + §11 deployed 2026-04-30. Use `tools/100pct-medicash-request.json` and `tools/device-test-request-medicash.json` (both updated with correct insuranceSeqNo: 3).
+- **Do NOT pass `--hospital-id` to `crm_client.py`** — this CLI flag at `crm_client.py:33-35` incorrectly overwrites `organizationId` with the hospitalId value, causing medicash lookup failures. Bug filed upstream. hospitalId is already parsed from the WS token.
 - **Don't push to `origin/develop`** without explicit user consent. There's a pile of unpushed commits.
 - **Don't touch the spec doc** at `docs/superpowers/specs/toss-payment-flow.md` — that's the backend's deployed contract, mirrored from Slack.
 - **`smartdoctor-api/tools/toss-payment-test/` is staged but unwanted** on that repo's main branch. Cleanup at end: `git -C ~/Documents/jnitprojects/smartdoctor-api restore --staged tools/ && rm -rf ~/Documents/jnitprojects/smartdoctor-api/tools`.

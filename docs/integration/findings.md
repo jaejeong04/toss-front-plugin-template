@@ -12,16 +12,29 @@ Reference harness: `smartdoctor-api/tools/toss-payment-test/{plugin,crm}_client.
 | Happy path (CRM session.create → SUCCEEDED) | ✅ pass | Full Toss response forwarded to CRM; auto-pointContext enrichment works |
 | Reconcile recovery (`late: true`) | ✅ pass | ~90s expiry, `session.reconcile` arrives, late SUCCEEDED forwarded |
 | Refund (`kind: cancel`) | ✅ pass | `cancelParams` correctly built from persisted Toss fields |
-| 100% 메디캐시 (`tossResponse: null`) | ❌ **FAIL** | Backend WS 1011 crash; session poisoned IN_PROGRESS. Backend fix needed. |
+| 100% 메디캐시 (`tossResponse: null`) | ✅ **RESOLVED** | Resolved by 2026-04-30 backend deploy (spec §6 + §11). |
+| Mixed medicash + card payment | ✅ **RESOLVED** | End-to-end verified 2026-05-04 (sessionId `3aafbad1-be46-41d1-9848-85a8633ac54b`, approval `77799441`, refund `0c34eab1-...`). |
 
 **Wire contract:** verified end-to-end. The FE wire fixes (commits `742bf07` → `cb85f03`) land cleanly against deployed dev.
 
 **Outstanding production work:**
-- Backend must handle `tossResponse: null` in `session.result` (or coordinate a sentinel shape with FE).
 - `CORE_TOKEN` is hardcoded in [front-plugin-js/config.js:14](../../front-plugin-js/config.js); production token-fetch flow TBD (TODO comment in place).
 - Open questions from spec §15 (trust model for unknown serials, `merchant.id` wire path) not addressed by this work.
 
 
+
+## Mixed-medicash payment + refund (verified 2026-05-04)
+
+- **Status:** ✅ SUCCEEDED
+- **Date:** 2026-05-04
+- **Session ID:** `3aafbad1-be46-41d1-9848-85a8633ac54b`
+- **Approval number:** `77799441`
+- **Refund ID:** `0c34eab1-...`
+- **Test customer:** `411160` ("테스트"), insuranceSeqNo: 3, clinicSeqNo: 42, organizationId: 99999997
+- **Flow:** CRM `session.create` with explicit `pointContext` → plugin claimed, applied medicash, sent valid `tossResponse` with non-zero `pointUseAmount` → backend forwarded `session.result SUCCEEDED` to CRM → immediate `refund.create` → `refund.result SUCCEEDED`. End-to-end net-zero.
+- **Backend deploy prerequisite:** spec §11 Error Frames deployed on 2026-04-30 (WS lifecycle graceful; no more 1011 crashes). Spec §6 100%-medicash `tossResponse: null` path also deployed same day.
+- **Root cause of prior failures resolved:** The previous "Non-zero `pointUseAmount`" crash (session `b1a2dfa0-...`) was **not** a backend bug — it was a test-harness CLI bug in `smartdoctor-api/tools/toss-payment-test/crm_client.py:33-35` where the `--hospital-id` flag overwrites `organizationId` with the hospitalId value. Customer 411160 requires `organizationId: 99999997`; sending `99995` caused the backend to reject the medicash lookup. With correct organizationId, the flow works cleanly.
+- **Orphaned charge note:** Session `b1a2dfa0-0866-4708-bf0a-3eec36ce974f` resulted in an orphaned 500원 card charge that is unrecoverable (backend session corrupted by the incorrect organizationId; refund path also fails). Acknowledged by user as minimal real-money loss; no action taken.
 
 ## Pre-flight (WS handshake)
 
@@ -102,43 +115,35 @@ After rebooting the device (which re-loaded home.html → re-connected WS), the 
 
 ## 100% 메디캐시 (`tossResponse: null`)
 
-- **Status:** ❌ **FAIL — backend crashes on `tossResponse: null`**
-- **Test:** Drove a session with explicit `pointContext.availableBalance: 999999` (so backend skips auto-enrichment), plugin replied with `session.result {pointUseAmount: 30000, chargedSupplyValue: 0, chargedTax: 0, tossResponse: null}`.
-- **Observed sequence (plugin side):**
-  1. `device.registered` ✅
-  2. `session.dispatch` with our explicit `pointContext` passed through verbatim (good — backend honored "CRM이 명시적으로 넘긴 pointContext는 그대로 저장하고 plugin에 전달한다") ✅
-  3. Plugin sent claim → chargeContext → result with `tossResponse: null` ✅
-  4. Backend: `session.status IN_PROGRESS` (acknowledged claim) ✅
-  5. Backend sent **WS close 1011 ("internal error")** immediately after receiving `session.result {tossResponse: null}` ❌
-- **CRM-side observed (Terminal B):** `session.ack` → `session.status DISPATCHED` → `session.status IN_PROGRESS` → **then nothing** (only heartbeat pongs). No terminal `session.result`, no `error` frame. The session is stuck IN_PROGRESS on the backend side from CRM's perspective.
-- **Diagnosis:** WS 1011 is a server-side unhandled exception, not a validation rejection. Backend's `session.result` handler does not handle `tossResponse: null`.
-- **Severity bump:** This isn't only a happy-path-rejection bug. The crash poisons the session — backend persists the session as IN_PROGRESS, watchdog will eventually expire it (~90s, per Task 8), and on reconcile the plugin would replay the same `tossResponse: null` payload and trigger the same crash. **Sessions in this state cannot resolve cleanly via the existing recovery flow.**
-- **Spec context:**
-  - FE spec `2026-04-27-frontend-plugin.md` says: when `charged === 0` (treatment fully covered by medicash), plugin skips `requestPayment` and sends `session.result` with `tossResponse: null`. FE commit `cbcc11d` (2026-04-29) implements this.
-  - Backend deployed-flow doc `toss-payment-flow.md` §6 example shows `tossResponse` always populated. The null path is not specified.
-  - The two specs disagree. FE behavior follows its spec; backend lacks corresponding handling.
-- **Recommended backend fix (any of):**
-  1. Accept `tossResponse: null` in `session.result` payload, treat as POINTS_ONLY: mark session SUCCEEDED, set `toss_payment_method = null`, forward `tossResponse: null` to CRM.
-  2. Define a sentinel shape (e.g. `tossResponse: { type: "POINTS_ONLY", response: null }`) and update FE to send that instead.
-  3. Update both specs to align on whichever choice.
-- **FE-side action (if backend picks option 2):** Trivial change in [front-plugin-js/payment.html:108-118](../../front-plugin-js/payment.html) — replace `tossResponse: null` with the agreed sentinel.
-- **Action: file with backend in Slack thread `C099YT4CL75`.** Reproduce: `python3 tools/100pct-medicash-test.py --token crm_qalmighty` against deployed dev with the override JSON.
+- **Status:** ✅ **RESOLVED — Resolved by 2026-04-30 backend deploy (spec §6 + §11).**
+- **Original failure (for context):** Backend crashed with WS 1011 when receiving `session.result {tossResponse: null}`. Session poisoned IN_PROGRESS. Filed with backend in Slack thread `C099YT4CL75`.
+- **Resolution:** Backend deployed spec §6 (100%-medicash null-tossResponse path) + spec §11 (Error Frames / graceful WS lifecycle) on 2026-04-30. The crash no longer occurs.
+- **Spec alignment:** `toss-payment-flow.md` §6 now documents the `tossResponse: null` POINTS_ONLY path as the canonical contract. FE behavior (commit `cbcc11d`, 2026-04-29) was already correct; backend now handles it.
 
 ## Non-zero `pointUseAmount` (any medicash use)
 
-- **Status:** ❌ **FAIL — backend crashes on non-zero `pointUseAmount` in `session.result`**
-- **Date:** 2026-04-30
-- **Original session:** `b1a2dfa0-0866-4708-bf0a-3eec36ce974f`
-- **Test setup:** CRM `session.create` with explicit `pointContext.availableBalance: 500` against 1,000원 total ([tools/device-test-request-medicash.json](../../tools/device-test-request-medicash.json)). Real Samsung Mastercard, real Toss SDK call.
-- **What the device user did:** order page → tapped 메디캐시 사용 → use-points page applied **all 500원** (Toss Front UI is all-or-none by design — no partial amount entry possible) → returned to order page showing 500원 to charge → Toss SDK card terminal → tapped card → real-card SUCCESS screen with valid approval number → 확인 → idle. **No user-visible failure on the device.**
-- **Observed sequence (CRM side):** `session.ack` → `session.status DISPATCHED` → `session.status IN_PROGRESS` → CRM WS aborted **TCP-level** (`no close frame received or sent`) before any `session.result` arrived.
-- **The reason device looked clean:** plugin's Task 17 auto-reconnect re-opened the WS after backend dropped it, masking the backend crash from the device user.
-- **Refund attempt confirmation:** `refund.create` against the same `originalSessionId` over a fresh CRM WS → **WS close 1011 (internal error)** immediately, no `error` frame, no plugin dispatch (device stayed idle). Confirms the original session is stuck `IN_PROGRESS` with partially-written state on backend.
-- **Diagnosis:** `session.result` handler crashes on the points-application code path when `pointUseAmount > 0`, even with valid `tossResponse`. Different trigger from the 100%-medicash bug (non-zero `pointUseAmount` + valid `tossResponse`), same crash family (WS 1011, session poisoned).
-- **Why this wasn't caught earlier:** the Python harness's "happy path with `--use-points`" test ran against customer 411160 whose auto-enriched `pointContext.availableBalance` was 0 → `pointUseAmount = 0` end-to-end → never exercised the points-application path. Today's test is the first time non-zero `pointUseAmount` was driven end-to-end on dev.
-- **Production blast radius:** **100% of medicash use crashes backend.** The Toss Front use-points UI is all-or-none (no partial amount entry possible — UI constraint, intended), so every customer who taps "use points" will land in one of two crash paths:
-  - `availableBalance >= total` → 100%-medicash null-tossResponse crash (existing bug above)
-  - `availableBalance < total` → non-zero `pointUseAmount` crash (this bug)
-- **Real-money side effect:** 500원 was captured on the user's Samsung Mastercard. Cannot be refunded via the broken session (refund handler crashes too). Backend team to either fix the bug + heal the session, or issue a Toss admin cancel directly.
-- **Severity:** higher than 100%-medicash bug. Mixed-payment is the dominant production path; 100% coverage is rarer.
-- **Action: file with backend in Slack thread `C099YT4CL75`** alongside the 100%-medicash bug. Two-bug pattern strongly suggests medicash code paths need a defensive audit, not one-off fixes.
+- **Status:** ✅ **RESOLVED — Root cause was NOT a backend bug; test-harness CLI was clobbering organizationId.**
+- **Date of original failure:** 2026-04-30; **Date resolved (end-to-end verified):** 2026-05-04
+- **Original session (failed):** `b1a2dfa0-0866-4708-bf0a-3eec36ce974f`
+- **Verified session (success):** `3aafbad1-be46-41d1-9848-85a8633ac54b` (approval `77799441`, refunded cleanly via `0c34eab1-...`)
+
+**Root cause (corrected):**
+
+The crash was caused by `smartdoctor-api/tools/toss-payment-test/crm_client.py:33-35`, which parses `--hospital-id` from the CLI and incorrectly writes it into the `organizationId` field of the `session.create` payload. This overwrote `organizationId: 99999997` with `99995` (the hospitalId value). Backend's medicash lookup uses `organizationId` to resolve the patient's insurance record; with the wrong organizationId it failed, producing the WS 1011 crash.
+
+Customer 411160's correct identifiers: `insuranceSeqNo: 3` (not 1, which was the spec example value), `clinicSeqNo: 42`, `organizationId: 99999997`.
+
+**Medicash UI render gating math (discovered during debugging):**
+
+```
+usableCash = floor(min(availableBalance, totalAmount) / 100) * 100
+UI shows medicash option when: usableCash >= minUseAmount && usableCash > 0
+```
+
+This is the FE render gate for the "사용 가능 메디캐시" section on the order page.
+
+**Backend spec §11 contribution:** spec §11 Error Frames deployed 2026-04-30 made the WS lifecycle graceful. This was a contributing factor to clean recovery — but the root crash was always the organizationId mismatch, not a backend medicash handler bug.
+
+**Orphaned charge from original session:** 500원 was captured on Samsung Mastercard during session `b1a2dfa0-0866-4708-bf0a-3eec36ce974f`. The session is stuck `IN_PROGRESS` and the refund path also fails (session corrupted by incorrect organizationId). This charge is **acknowledged-but-unrecoverable** — user accepted as minimal real-money loss from debugging. No further action.
+
+**Action:** None — bug filed upstream (crm_client.py). Test harness must be called without `--hospital-id` to avoid clobbering organizationId. See `dev-smoke-checklist.md` for updated repro commands.

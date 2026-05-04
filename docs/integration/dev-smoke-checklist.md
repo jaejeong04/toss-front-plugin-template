@@ -15,7 +15,7 @@ Reference Python harness: `smartdoctor-api/tools/toss-payment-test/` on `feature
 ## 1. Happy path (CRM creates session, plugin completes)
 
 - [x] `plugin_client.py --use-points` running on terminal A
-- [x] `crm_client.py --hospital-id 99995 --customer-number 411160` triggered on terminal B
+- [x] `crm_client.py --customer-number 411160` triggered on terminal B (no `--hospital-id`; see note below)
 - [x] CRM observes `session.ack` → `session.status DISPATCHED` → `session.status IN_PROGRESS` → `session.result SUCCEEDED`
 - [x] Plugin observes `session.dispatch (kind=payment)` with `pointContext` populated → sends `session.claim`, `session.chargeContext`, `session.result`
 - [x] Validation `pointUseAmount + chargedSupply + chargedTax + tip == original sum` passes (no `error` frame from Core)
@@ -43,9 +43,13 @@ Reference Python harness: `smartdoctor-api/tools/toss-payment-test/` on `feature
 - [x] CRM session.create with explicit `pointContext.availableBalance: 999999` (override, since dev customer 411160 has zero medicash)
 - [x] Plugin sends `session.chargeContext` with zero charged amounts and full point use
 - [x] Plugin sends `session.result` with `tossResponse: null`
-- [ ] ❌ Backend accepts (no `error` frame); CRM observes SUCCEEDED — **FAIL.** Backend closed plugin WS with code 1011 (internal error). See `findings.md` for repro and recommended fix.
+- [x] ✅ Backend accepts (no `error` frame); CRM observes SUCCEEDED — **RESOLVED by 2026-04-30 backend deploy (spec §6 + §11).** Use `tools/100pct-medicash-request.json`.
 
 ## Quick repro (anyone)
+
+> **Note:** Don't pass `--hospital-id`; the `smartdoctor-api` `crm_client.py:33-35` incorrectly overrides `organizationId` with the value (bug filed upstream). `hospitalId` is parsed from the WS token regardless.
+
+Test customer: `411160` ("테스트"), insuranceSeqNo: 3, clinicSeqNo: 42, organizationId: 99999997.
 
 ```bash
 # Terminal A: plugin mock — leave running for Tasks 7–10
@@ -57,5 +61,5 @@ python3 ~/Documents/jnitprojects/smartdoctor-api/tools/toss-payment-test/plugin_
 python3 ~/Documents/jnitprojects/smartdoctor-api/tools/toss-payment-test/crm_client.py \
   --base-url wss://develop.api.core.smartdoctor.systems \
   --serial TF-DEV-<initials>-001 --token crm_qalmighty \
-  --workstation-id ws-dev-<initials>-001 --hospital-id 99995 --customer-number 411160
+  --workstation-id ws-dev-<initials>-001 --customer-number 411160
 ```
