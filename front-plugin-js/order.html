@@ -98,6 +98,58 @@
           console.warn("[smartdoctor] order.html ws error", ev);
         };
 
+        // Spec §11 (deployed 2026-04-30): backend sends graceful `error` frames
+        // instead of closing with 1011. Also handles `session.abort` sent while
+        // the user is mid-flow on this page. Both cases: surface the reason via
+        // toast and navigate to home.html, which re-mounts the idle dispatcher.
+        ws.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data);
+
+            switch (msg.type) {
+              case "pong": {
+                // Heartbeat reply — no action needed.
+                return;
+              }
+
+              case "session.abort": {
+                // Backend or CRM aborted the session while user is on the
+                // use-points/order page. Surface it and return to idle.
+                console.log("[smartdoctor] order.html session.abort", msg.payload);
+                sdk.template.openToast({ message: "세션이 종료되었어요", icon: "error" });
+                location.href = "./home.html";
+                return;
+              }
+
+              case "error": {
+                // Spec §11: graceful error frame replacing WS 1011 close.
+                // Codes: INVALID_REQUEST | INVALID_STATE | UPSTREAM_ERROR | INTERNAL_ERROR
+                const p = msg.payload || {};
+                console.warn(
+                  "[smartdoctor] order.html backend error",
+                  p.code,
+                  p.message,
+                  p.sessionId,
+                );
+                const reason = p.message || p.code || "알 수 없는 오류";
+                sdk.template.openToast({ message: `오류가 발생했어요: ${reason}`, icon: "error" });
+                location.href = "./home.html";
+                return;
+              }
+
+              default: {
+                // Forward-compat: log unknown frame types without crashing.
+                console.warn("[smartdoctor] order.html unknown ws message", msg.type, msg);
+                return;
+              }
+            }
+          } catch (e) {
+            // Outer guard: JSON.parse failure, SDK rejection, or storage error
+            // must not become an unhandled rejection — same pattern as home.html.
+            console.warn("[smartdoctor] order.html ws message handler failed", e);
+          }
+        };
+
         // 5. Compute usable cash. Spec §4.4 / PDF p.9:
         //      usableCash = floor(min(balance, treatmentTotal) / 100) * 100
         //    Math.floor (NOT round) — round-down ensures we never offer more
