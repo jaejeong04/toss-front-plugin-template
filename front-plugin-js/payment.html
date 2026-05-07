@@ -206,8 +206,6 @@
         });
 
         // 5. Request payment. Spec §2.1 / §7: cash excluded literally.
-        //    The SDK returns {type: "SUCCESS"|"CANCELED"|"TIMEOUT"} — failure
-        //    is a value, not a throw, so no try/catch needed for branching.
 
         // Bail if backend rejected our chargeContext or otherwise rejected the
         // session — error frame arrived between chargeContext send and this point.
@@ -229,7 +227,19 @@
           timeoutMs: dispatch.timeoutMs ?? 60000,
           localeCode: "ko",
           excludePaymentTypes: ["CASH"],
+        }).catch((err) => {
+          console.error("[smartdoctor] requestPayment failed", err);
+          return null;
         });
+
+        if (!result) {
+          await sdk.storage.remove({ key: window.smartdoctor.PENDING_KEY });
+          sessionStorage.removeItem("smartdoctor.dispatch");
+          sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
+          closeWs(ws);
+          await renderBackendErrorPage({ message: "결제 처리 중 오류가 발생했어요" });
+          return;
+        }
 
         // RC-1: post-await re-check. An error frame that arrived DURING the
         // requestPayment call (user held the terminal for minutes) is now in
@@ -374,7 +384,18 @@
 
         const result = await sdk.payment.requestPaymentCancel(
           dispatch.cancelParams,
-        );
+        ).catch((err) => {
+          console.error("[smartdoctor] requestPaymentCancel failed", err);
+          return null;
+        });
+
+        if (!result) {
+          sessionStorage.removeItem("smartdoctor.dispatch");
+          sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
+          closeWs(ws);
+          await renderBackendErrorPage({ message: "환불 처리 중 오류가 발생했어요" });
+          return;
+        }
 
         // RC-1: post-await re-check. An error frame that arrived DURING the
         // requestPaymentCancel call is now in backendErrorRef. If we don't
@@ -565,14 +586,20 @@
             }
           }, HEARTBEAT_MS);
           // 6. Dispatch by kind + hash match.
-          if (dispatch.kind === "payment" && dispatch.sessionId === hashId) {
-            await runPayment(ws, dispatch, backendErrorRef);
-          } else if (
-            dispatch.kind === "cancel" &&
-            dispatch.refundId === hashId
-          ) {
-            await runCancel(ws, dispatch, backendErrorRef);
-          } else {
+          try {
+            if (dispatch.kind === "payment" && dispatch.sessionId === hashId) {
+              await runPayment(ws, dispatch, backendErrorRef);
+            } else if (
+              dispatch.kind === "cancel" &&
+              dispatch.refundId === hashId
+            ) {
+              await runCancel(ws, dispatch, backendErrorRef);
+            } else {
+              closeWs(ws);
+              location.href = "./home.html";
+            }
+          } catch (err) {
+            console.error("[smartdoctor] payment.html onopen error", err);
             closeWs(ws);
             location.href = "./home.html";
           }
