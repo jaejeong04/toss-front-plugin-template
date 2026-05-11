@@ -296,7 +296,7 @@ Core -> CRM:
 
 ## 5. Plugin Saves Charge Context
 
-Plugin은 포인트 사용 여부를 반영한 실제 Toss 결제 금액을 Toss SDK 호출 직전에 core로 보낸다.
+Plugin은 포인트 사용 여부를 반영한 실제 Toss 결제 금액을 phase 1 종료 직후 (사용자가 메디캐시 사용 옵션을 선택한 직후) core로 보낸다. 이는 Toss SDK 호출 이전 단계로, core가 할인 후 금액을 CRM에 전달해 CRM이 NICE 카드 단말기에 결제 dispatch를 보낼 수 있도록 한다. 자세한 NICE 단말기 flow는 §5.5와 [docs/payment-flow-with-nice-terminal.md](../../payment-flow-with-nice-terminal.md)를 참조한다.
 
 Plugin -> Core:
 
@@ -328,7 +328,27 @@ Hospital DB 저장:
 - `TOSS_CHRG_SUPPLY_VAL`
 - `TOSS_CHRG_TAX_AMT`
 
-그 다음 plugin이 Toss SDK를 호출한다.
+Plugin은 chargeContext 송신 직후 다음 분기로 진입한다.
+
+- **100% 메디캐시 (`chargedSupplyValue === 0 && chargedTax === 0`)**: NICE 단말기를 거치지 않는다. Plugin이 `session.proceed`를 기다리지 않고 곧바로 §6의 `session.result`로 진행한다 (`tossResponse: null`). Core는 zero-charge chargeContext를 보고 CRM에 NICE dispatch를 보내지 말라고 신호한다.
+- **부분 메디캐시 또는 메디캐시 미사용 (`chargedSupplyValue + chargedTax > 0`)**: Plugin은 §5.5의 `session.proceed`를 기다린다. Core는 CRM에 할인 후 금액을 전달하고, CRM은 NICE 단말기에 결제 dispatch를 보낸다. NICE가 준비되면 core가 `session.proceed`로 plugin을 깨운다.
+
+## 5.5. Plugin Awaits Proceed
+
+Phase 1과 phase 2 사이의 경계다. CRM이 NICE 카드 단말기에 결제 dispatch를 마치고 NICE가 결제 처리 준비를 마치면 core가 plugin에 `session.proceed`를 송신한다. 이 메시지가 도착한 후에만 plugin이 Toss SDK를 호출한다.
+
+Core -> Plugin:
+
+```json
+{
+  "type": "session.proceed",
+  "payload": {
+    "sessionId": "{sessionId}"
+  }
+}
+```
+
+Plugin은 `sessionId`가 현재 진행 중인 session과 일치하는지 검증한 뒤 Toss SDK를 호출한다.
 
 ```ts
 sdk.payment.requestPayment({
@@ -339,6 +359,18 @@ sdk.payment.requestPayment({
   excludePaymentTypes: ['CASH']
 })
 ```
+
+Core가 `session.proceed`를 송신하는 시점:
+
+- Plugin의 `session.chargeContext`를 정상 처리한 뒤
+- CRM에 할인 후 금액을 전달하고 CRM이 NICE에 결제 dispatch를 마친 뒤
+- NICE가 카드 입력 준비를 마쳤다고 CRM이 core에 통보한 뒤
+
+`session.proceed`가 100% 메디캐시 결제에서는 발생하지 않는다. §5 마지막 문단 참조.
+
+`AWAITING_NICE` 등 별도 sub-state를 둘지 여부는 core 구현자가 결정한다. 현재 `IN_PROGRESS`는 abort 불가이므로, NICE 대기 중 CRM-driven abort를 허용하려면 backend state machine 확장이 필요하다 (자세한 내용은 [docs/payment-flow-with-nice-terminal-backend.md](../../payment-flow-with-nice-terminal-backend.md) §4.4 참조).
+
+**Plugin-side feature gate**: Plugin은 `config.js`의 `AWAITS_PROCEED` flag로 이 동작을 gating한다. `false`이면 plugin은 chargeContext 직후 곧바로 payment.html로 navigate하여 Toss SDK를 호출한다 (legacy flow). Core가 `session.proceed`를 본격 도입한 뒤 plugin 배포 측에서 `true`로 flip한다.
 
 ## 6. Plugin Sends Payment Result
 
@@ -777,6 +809,8 @@ Core owns:
 - Toss response extraction
 - Hospital Feign calls
 - WS token authentication context, including hospitalId
+- `session.proceed` dispatch to plugin after CRM/NICE handoff (§5.5)
+- Skip-NICE signaling to CRM on zero-charge sessions (§5)
 
 Hospital owns:
 
@@ -798,8 +832,10 @@ CRM owns:
 Plugin owns:
 
 - Toss SDK calls
-- Order/point UI rendering
+- Order/point UI rendering (custom HTML for the 메디캐시 page; Toss templates for waiting/result)
 - Point-use amount selection and `session.chargeContext`
+- Phase 1 → phase 2 waiting screen and `session.proceed` consumption
 - `requestPayment`
 - `requestPaymentCancel`
 - `getPayment` recovery
+- 100% 메디캐시 skip-NICE detection (sends zero chargeContext without waiting for `session.proceed`)

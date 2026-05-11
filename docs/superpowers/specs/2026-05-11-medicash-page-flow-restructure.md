@@ -106,6 +106,18 @@ Rendered into `#app` via `innerHTML`. Shows:
 
 Stays foreground until `session.proceed` arrives over WS B.
 
+**Defensive timeout**: If `session.proceed` does not arrive within 120 seconds, plugin shows an error toast ("결제 단말기 응답이 늦어지고 있어요") and sends `session.abort(USER_BACKED_OUT)` before navigating home. Backend's `IN_PROGRESS` timer (`timeoutMs + 30s`) would also fire, but the plugin needs its own escape hatch in case the WS itself dropped silently.
+
+### 3.3.1 Feature gate (`AWAITS_PROCEED`)
+
+The waiting screen is gated by `window.smartdoctor.config.AWAITS_PROCEED` in `config.js`. When `false` (default), plugin navigates directly to payment.html after `session.chargeContext` — the pre-restructure flow. When `true`, plugin renders the waiting screen and waits for `session.proceed`.
+
+Rollout sequence:
+1. Deploy plugin with `AWAITS_PROCEED: false` — safe (matches old backend behavior)
+2. Backend ships `session.proceed`
+3. CRM ships NICE 카드 단말기 dispatch
+4. Flip `AWAITS_PROCEED: true` in `config.js`, redeploy plugin
+
 ### 3.4 payment.html changes
 
 Remove the `session.chargeContext` send (current lines 126–134). The rest of `runPayment` is unchanged — it still computes charged/tax/supplyValue from `pointUse` for `requestPayment` and `pendingPayment`.
@@ -119,7 +131,7 @@ Unchanged at the SDK level. When `charged === 0`:
 
 ### 3.6 `session.proceed` contract (new WS B message)
 
-Backend sends this to plugin over WS B after CRM has dispatched to NICE and NICE is ready for the Toss FRONT payment. Minimal shape:
+Backend sends this to plugin over WS B after CRM has dispatched to NICE and NICE is ready for the Toss FRONT payment. Documented canonically in [toss-payment-flow.md §5.5](toss-payment-flow.md). Minimal shape:
 
 ```json
 {
@@ -138,9 +150,11 @@ Plugin validates `sessionId` matches the current session before navigating.
 
 | File | Change |
 |---|---|
-| `front-plugin-js/order.html` | Major: custom 메디캐시 page + `handlePointChoice` + chargeContext send + waiting screen |
-| `front-plugin-js/payment.html` | Minor: remove chargeContext send (lines 126–134) |
+| `front-plugin-js/order.html` | Major: custom 메디캐시 page + `handlePointChoice` + chargeContext send + waiting screen + AWAITS_PROCEED gate + 120s timeout |
+| `front-plugin-js/payment.html` | Minor: remove chargeContext send |
 | `front-plugin-js/global.css` | Add styles for custom 메디캐시 page and waiting screen |
+| `front-plugin-js/config.js` | Add `AWAITS_PROCEED` feature flag |
+| `docs/superpowers/specs/toss-payment-flow.md` | Add §5.5 `session.proceed` contract; update §5 timing |
 
 ---
 
