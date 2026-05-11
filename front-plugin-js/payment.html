@@ -121,19 +121,7 @@
         const tax = Math.floor(charged / 11);
         const supplyValue = charged - tax;
 
-        // 3. session.chargeContext BEFORE requestPayment so backend can
-        //    recover even if the plugin reloads mid-Toss-UI. Spec §4.3.
-        sendWs(ws, {
-          type: "session.chargeContext",
-          payload: {
-            sessionId: dispatch.sessionId,
-            pointUseAmount: pointUse,
-            chargedSupplyValue: supplyValue,
-            chargedTax: tax,
-          },
-        });
-
-        // 3a. 100% 메디캐시 coverage — no Toss-side payment to make.
+        // 3. 100% 메디캐시 coverage — no Toss-side payment to make.
         //     Toss docs only document non-zero requestPayment examples and don't
         //     specify behavior at tax=0/supplyValue=0, so we skip the SDK call
         //     entirely. Backend contract: when chargedSupplyValue === 0 AND
