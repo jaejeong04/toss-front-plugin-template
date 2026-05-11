@@ -110,6 +110,7 @@
 
               case "session.proceed": {
                 if (waitingForProceed && msg.payload?.sessionId === sessionId) {
+                  waitingForProceed = false;
                   closeWs(ws);
                   location.href = "./payment.html#" + sessionId;
                 }
@@ -209,6 +210,16 @@
             return;
           }
 
+          // Feature gate: until backend ships session.proceed, fall back to
+          // the pre-restructure flow (navigate directly to payment.html after
+          // chargeContext). Flip AWAITS_PROCEED in config.js once backend +
+          // CRM + NICE are ready.
+          if (!window.smartdoctor.config.AWAITS_PROCEED) {
+            closeWs(ws);
+            location.href = "./payment.html#" + sessionId;
+            return;
+          }
+
           waitingForProceed = true;
           renderWaitingScreen();
         }
@@ -287,6 +298,25 @@
             "click",
             sendAbortAndGoHome,
           );
+
+          // Defensive timeout: if session.proceed never arrives (WS dropped
+          // silently, backend bug, or NICE never triggered), escape after
+          // 120s instead of leaving the user stuck on the spinner. Backend's
+          // IN_PROGRESS expiry (timeoutMs + 30s) will also fire eventually
+          // but plugin needs its own escape hatch.
+          setTimeout(async () => {
+            if (!waitingForProceed) return;
+            waitingForProceed = false;
+            try {
+              await sdk.template.openToast({
+                message: "결제 단말기 응답이 늦어지고 있어요",
+                icon: "error",
+              });
+            } catch (e) {
+              console.warn("[smartdoctor] order.html waiting timeout toast failed", e);
+            }
+            sendAbortAndGoHome();
+          }, 120000);
         }
 
         if (usableCash >= minUse && usableCash > 0) {

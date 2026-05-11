@@ -11,6 +11,14 @@ window.smartdoctor.config = {
   // TODO(prod-token): replace this constant with the real token-fetch flow
   // before live deploy. See docs/superpowers/specs/toss-payment-flow.md §1.
   CORE_TOKEN: "crm_qalmighty",
+
+  // session.proceed feature gate. When false, plugin behaves like the
+  // pre-restructure flow: after sending session.chargeContext it navigates
+  // directly to payment.html. When true, plugin renders the waiting screen
+  // and waits for backend's session.proceed before navigating. Flip to true
+  // only after backend has shipped session.proceed (and CRM has wired the
+  // NICE 카드 단말기 dispatch). See docs/superpowers/specs/toss-payment-flow.md §5.5.
+  AWAITS_PROCEED: false,
 };
 
 window.smartdoctor.backendWsUrl = function (path) {
