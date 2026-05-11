@@ -26,16 +26,6 @@
   <body>
     <div id="app"></div>
     <script>
-      // order.html — payment-path use-point + order-confirm. Spec §6.2.
-      // Reads the dispatch payload stashed by home.html on session.dispatch
-      // (spec §4.2/§6.1), opens a fresh WS B for session.claim/session.abort
-      // (spec §4.3), and renders renderUsePointPage / renderOrderPage. The
-      // actual requestPayment call lives in payment.html (Task 6) — order.html
-      // hands the chosen pointUse off via sessionStorage and navigates.
-
-      // Spec §4.1: client sends ping every 20s; backend drops after 3 misses.
-      // The user can pause on the use-point page indefinitely, so we ping to
-      // keep the socket alive while they decide.
       const HEARTBEAT_MS = 20000;
 
       function closeWs(ws) {
@@ -45,11 +35,8 @@
       }
 
       async function main() {
-        // 1. sessionId from URL hash. home.html sets `./order.html#<sessionId>`.
         const sessionId = location.hash.slice(1);
 
-        // 2. Dispatch payload stashed by home.html. Validate kind + sessionId
-        //    match — anything else is a stale or wrong-page invocation.
         const dispatchJson = sessionStorage.getItem("smartdoctor.dispatch");
         const dispatch = dispatchJson ? JSON.parse(dispatchJson) : null;
         if (
@@ -61,25 +48,34 @@
           return;
         }
 
-        // 3. Device serial — backend trusts it via partner-portal registration.
         const { serialNumber } = await sdk.app.getSerialNumber();
 
-        // 4. Open a fresh WS B connection. order.html is not the dispatcher —
-        //    we only need it to send session.claim and (optionally) session.abort.
-        //    payment.html will open its own socket, and home.html re-opens the
-        //    long-lived one when we go idle.
         const ws = new WebSocket(window.smartdoctor.pluginWsUrl(serialNumber));
         let heartbeatTimer = null;
+        let waitingForProceed = false;
+
+        function sendAbortAndGoHome() {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(
+              JSON.stringify({
+                type: "session.abort",
+                payload: { sessionId, reason: "USER_BACKED_OUT" },
+              }),
+            );
+          }
+          closeWs(ws);
+          sessionStorage.removeItem("smartdoctor.dispatch");
+          sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
+          location.href = "./home.html";
+        }
 
         ws.onopen = () => {
-          // spec §4.3: first message after connect
           ws.send(
             JSON.stringify({
               type: "device.register",
               payload: { serialNumber, sdkVersion: "v0" },
             }),
           );
-          // Spec §4.3: plugin acknowledges it's about to show the order page.
           ws.send(
             JSON.stringify({
               type: "session.claim",
@@ -104,34 +100,38 @@
           console.warn("[smartdoctor] order.html ws error", ev);
         };
 
-        // Spec §11 (deployed 2026-04-30): backend sends graceful `error` frames
-        // instead of closing with 1011. Also handles `session.abort` sent while
-        // the user is mid-flow on this page. Both cases: surface the reason via
-        // toast and navigate to home.html, which re-mounts the idle dispatcher.
         ws.onmessage = async (ev) => {
           try {
             const msg = JSON.parse(ev.data);
 
             switch (msg.type) {
-              case "pong": {
-                // Heartbeat reply — no action needed.
+              case "pong":
+                return;
+
+              case "session.proceed": {
+                if (waitingForProceed && msg.payload?.sessionId === sessionId) {
+                  closeWs(ws);
+                  location.href = "./payment.html#" + sessionId;
+                }
                 return;
               }
 
               case "session.abort": {
-                // Backend or CRM aborted the session while user is on the
-                // use-points/order page. Surface it and return to idle.
                 ws.onmessage = null;
-                console.log("[smartdoctor] order.html session.abort", msg.payload);
-                await sdk.template.openToast({ message: "세션이 종료되었어요", icon: "error" });
+                console.log(
+                  "[smartdoctor] order.html session.abort",
+                  msg.payload,
+                );
+                await sdk.template.openToast({
+                  message: "세션이 종료되었어요",
+                  icon: "error",
+                });
                 closeWs(ws);
                 location.href = "./home.html";
                 return;
               }
 
               case "error": {
-                // Spec §11: graceful error frame replacing WS 1011 close.
-                // Codes: INVALID_REQUEST | INVALID_STATE | UPSTREAM_ERROR | INTERNAL_ERROR
                 ws.onmessage = null;
                 const p = msg.payload || {};
                 console.warn(
@@ -141,29 +141,31 @@
                   p.sessionId,
                 );
                 const reason = p.message || p.code || "알 수 없는 오류";
-                await sdk.template.openToast({ message: `오류가 발생했어요: ${reason}`, icon: "error" });
+                await sdk.template.openToast({
+                  message: `오류가 발생했어요: ${reason}`,
+                  icon: "error",
+                });
                 closeWs(ws);
                 location.href = "./home.html";
                 return;
               }
 
-              default: {
-                // Forward-compat: log unknown frame types without crashing.
-                console.warn("[smartdoctor] order.html unknown ws message", msg.type, msg);
+              default:
+                console.warn(
+                  "[smartdoctor] order.html unknown ws message",
+                  msg.type,
+                  msg,
+                );
                 return;
-              }
             }
           } catch (e) {
-            // Outer guard: JSON.parse failure, SDK rejection, or storage error
-            // must not become an unhandled rejection — same pattern as home.html.
-            console.warn("[smartdoctor] order.html ws message handler failed", e);
+            console.warn(
+              "[smartdoctor] order.html ws message handler failed",
+              e,
+            );
           }
         };
 
-        // 5. Compute usable cash. Spec §4.4 / PDF p.9:
-        //      usableCash = floor(min(balance, treatmentTotal) / 100) * 100
-        //    Math.floor (NOT round) — round-down ensures we never offer more
-        //    cash than the customer holds after the floor-to-100 step.
         function computeUsableCash(dispatch) {
           const treatmentTotal =
             dispatch.amount.supplyValue + dispatch.amount.tax;
@@ -172,158 +174,125 @@
           return Math.floor(rawUsable / 100) * 100;
         }
 
-        // 6. Build the renderOrderPage snapshot for a given pointUse. Spec §6.2 +
-        //    spec §2.3 renderOrderPage shape. Backend already populates items /
-        //    discounts / summary on dispatch.orderSnapshot; we only adjust for
-        //    the chosen point use and always set earned.
-        //    - pointUse > 0: append "메디캐시 사용" to discounts and bump
-        //      summary.discountAmount.
-        //    - Always: override summary.totalAmount to the NET value
-        //      (gross − discountAmount) so the bottom CTA reflects what the
-        //      user actually pays. When pointUse === 0 discountAmount === 0,
-        //      so the formula is a no-op and the original gross stays.
-        //    - Always: drop summary.paidAmount — "낸 금액" is past-tense and
-        //      appears before payment, which is confusing, and the information
-        //      is already implicit from totalAmount + the discounts list.
-        //    - Always: set summary.earned from dispatch.pointContext (the
-        //      discriminated-union value:number form requires `suffix`).
-        function buildOrderSnapshotWithPoints(snapshot, pointUse, pointContext) {
-          const baseDiscounts = snapshot.discounts ?? [];
-          const baseSummary = snapshot.summary ?? {};
-          const baseDiscountAmount = baseSummary.discountAmount ?? 0;
-
-          const discounts =
-            pointUse > 0
-              ? [...baseDiscounts, { label: "메디캐시 사용", value: pointUse }]
-              : baseDiscounts;
-
-          const discountAmount =
-            pointUse > 0 ? baseDiscountAmount + pointUse : baseDiscountAmount;
-
-          // Defensive: pointContext may exist with availableBalance/minUseAmount
-          // but lack earn-program fields (e.g. hospital with 메디캐시 use enabled
-          // but no earn program). Build the discriminated-union earned shape only
-          // when ALL three fields are present — otherwise undefined values would
-          // violate Toss's "value: number requires suffix: string" contract.
-          const hasEarn =
-            pointContext &&
-            pointContext.earnLabel != null &&
-            pointContext.earnAmount != null &&
-            pointContext.earnSuffix != null;
-          const earned = hasEarn
-            ? {
-                label: pointContext.earnLabel,
-                value: pointContext.earnAmount,
-                suffix: pointContext.earnSuffix,
-              }
-            : baseSummary.earned;
-
-          // Defensive: destructure out any incoming paidAmount so the spread
-          // cannot re-introduce it even if backend/test fixtures ever pass one.
-          const { paidAmount: _ignored, ...baseSummaryWithoutPaidAmount } = baseSummary;
-
-          const summary = {
-            ...baseSummaryWithoutPaidAmount,
-            totalAmount: baseSummaryWithoutPaidAmount.totalAmount - discountAmount,
-            discountAmount,
-            ...(earned !== undefined ? { earned } : {}),
-          };
-
-          return {
-            ...snapshot,
-            discounts,
-            summary,
-          };
-        }
-
-        // 7. Hand off to payment.html with the chosen pointUse stashed in a
-        //    separate sessionStorage key (`smartdoctor.dispatch.pointUse`) so
-        //    payment.html can read both the dispatch payload and the user's
-        //    point choice. Close our WS first — payment.html opens its own.
-        function showOrderPage(pointUse) {
-          const orderForDisplay = buildOrderSnapshotWithPoints(
-            dispatch.orderSnapshot,
-            pointUse,
-            dispatch.pointContext,
-          );
-
-          sdk.template.renderOrderPage({
-            order: orderForDisplay,
-            localeCode: "ko",
-            onClick: () => {
-              sessionStorage.setItem(
-                "smartdoctor.dispatch.pointUse",
-                String(pointUse),
-              );
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.close();
-              }
-              location.href = "./payment.html#" + sessionId;
-            },
-            // Spec §2.3: renderOrderPage's onBack is [GAP] — not in the
-            // documented Params block. Wire it but spec §6.2 explicitly says
-            // "abort correctness must not depend solely on this callback firing."
-            // The CRM-side abort path covers the case where this never fires.
-            onBack: () => {
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(
-                  JSON.stringify({
-                    type: "session.abort",
-                    payload: { sessionId, reason: "USER_BACKED_OUT" },
-                  }),
-                );
-                ws.close();
-              }
-              // Hygiene: clear the dispatch payload + point choice so a stale
-              // entry can't leak into the next session. home.html overwrites
-              // on the next dispatch anyway, but cleaning up here is cheap.
-              sessionStorage.removeItem("smartdoctor.dispatch");
-              sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
-              location.href = "./home.html";
-            },
-          });
-        }
-
-        // 8. Decide between use-point page and direct order page. Spec §4.4:
-        //    "If 사용 가능 캐시 < minUseAmount, skip renderUsePointPage entirely."
         const usableCash = computeUsableCash(dispatch);
         const treatmentTotal =
           dispatch.amount.supplyValue + dispatch.amount.tax;
         const minUse = dispatch.pointContext?.minUseAmount ?? 0;
 
+        function handlePointChoice(pointUse) {
+          const charged = treatmentTotal - pointUse;
+          const tax = Math.floor(charged / 11);
+          const supplyValue = charged - tax;
+
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(
+              JSON.stringify({
+                type: "session.chargeContext",
+                payload: {
+                  sessionId,
+                  pointUseAmount: pointUse,
+                  chargedSupplyValue: supplyValue,
+                  chargedTax: tax,
+                },
+              }),
+            );
+          }
+
+          sessionStorage.setItem(
+            "smartdoctor.dispatch.pointUse",
+            String(pointUse),
+          );
+
+          if (charged === 0) {
+            closeWs(ws);
+            location.href = "./payment.html#" + sessionId;
+            return;
+          }
+
+          waitingForProceed = true;
+          renderWaitingScreen();
+        }
+
+        function renderMedicashPage() {
+          document.getElementById("app").innerHTML = `
+            <div class="medicash-page">
+              <div class="medicash-header">
+                <button class="medicash-back" id="medicashBack">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                    <path d="M15 18l-6-6 6-6" stroke="#191F28" stroke-width="2"
+                          stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+              </div>
+              <div class="medicash-body">
+                <h1 class="medicash-title">메디캐시를 쓸까요?</h1>
+                <div class="medicash-balance">
+                  <div class="medicash-icon">P</div>
+                  <div class="medicash-balance-info">
+                    <span class="medicash-balance-label">사용 가능한 메디캐시</span>
+                    <span class="medicash-balance-amount">${usableCash.toLocaleString()}캐시</span>
+                  </div>
+                </div>
+              </div>
+              <div class="medicash-summary">
+                <div class="medicash-summary-row">
+                  <span class="medicash-summary-label">메디캐시 사용</span>
+                  <span class="medicash-summary-value">${usableCash.toLocaleString()}캐시</span>
+                </div>
+                <div class="medicash-summary-row">
+                  <span class="medicash-summary-label">총 결제 금액</span>
+                  <span class="medicash-summary-total">${(treatmentTotal - usableCash).toLocaleString()}원</span>
+                </div>
+              </div>
+              <div class="medicash-actions">
+                <button class="medicash-btn medicash-btn-cancel" id="medicashSkip">사용 안 함</button>
+                <button class="medicash-btn medicash-btn-submit" id="medicashUse">전액 사용</button>
+              </div>
+            </div>
+          `;
+
+          document.getElementById("medicashBack").addEventListener(
+            "click",
+            sendAbortAndGoHome,
+          );
+          document.getElementById("medicashSkip").addEventListener(
+            "click",
+            () => handlePointChoice(0),
+          );
+          document.getElementById("medicashUse").addEventListener(
+            "click",
+            () => handlePointChoice(usableCash),
+          );
+        }
+
+        function renderWaitingScreen() {
+          document.getElementById("app").innerHTML = `
+            <div class="waiting-page">
+              <div class="waiting-header">
+                <button class="medicash-back" id="waitingBack">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                    <path d="M15 18l-6-6 6-6" stroke="#191F28" stroke-width="2"
+                          stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+              </div>
+              <div class="waiting-body">
+                <div class="waiting-spinner"></div>
+                <p class="waiting-message">카드 단말기에서<br>결제를 진행해주세요</p>
+              </div>
+            </div>
+          `;
+
+          document.getElementById("waitingBack").addEventListener(
+            "click",
+            sendAbortAndGoHome,
+          );
+        }
+
         if (usableCash >= minUse && usableCash > 0) {
-          sdk.template.renderUsePointPage({
-            points: [{ name: "사용 가능한 메디캐시", amount: usableCash }],
-            summary: {
-              pointUsedAmount: usableCash,
-              paymentAmount: treatmentTotal - usableCash,
-            },
-            cta: {
-              // Per PDF: binary choice, not a slider.
-              submit: { onClick: () => showOrderPage(usableCash) }, // 전액 사용
-              cancel: { onClick: () => showOrderPage(0) }, // 사용 안 함
-            },
-            // Same pattern as renderOrderPage's onBack above: session is
-            // mid-flight (IN_PROGRESS), so abort the session before going
-            // idle. Without this, the back-arrow leaves a blank WebView
-            // that requires a device reboot to clear.
-            onBack: () => {
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(
-                  JSON.stringify({
-                    type: "session.abort",
-                    payload: { sessionId, reason: "USER_BACKED_OUT" },
-                  }),
-                );
-                ws.close();
-              }
-              sessionStorage.removeItem("smartdoctor.dispatch");
-              sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
-              location.href = "./home.html";
-            },
-          });
+          renderMedicashPage();
         } else {
-          showOrderPage(0);
+          handlePointChoice(0);
         }
       }
 
