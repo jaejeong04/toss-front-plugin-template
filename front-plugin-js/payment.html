@@ -128,13 +128,9 @@
         //     chargedTax === 0 AND tossResponse === null, treat as a points-only
         //     payment (no card/cash transaction occurred).
         if (charged === 0) {
-          // IM-2: guard between chargeContext and session.result. If backend
-          // rejected the chargeContext we must not send session.result to a
-          // discarded session and must not render a false success. Synchronous
-          // JS between the two sendWs calls means no microtask ran between
-          // them, but error frames queued before chargeContext may already be
-          // in backendErrorRef. Explicit check makes behavior consistent with
-          // all other paths.
+          // Guard: if backend sent an error frame (e.g. rejecting the
+          // session after order.html's chargeContext), bail before sending
+          // session.result to a discarded session.
           if (isBackendErrorForSession(backendErrorRef, dispatch.sessionId)) {
             closeWs(ws);
             await renderBackendErrorPage(backendErrorRef.current);
@@ -195,10 +191,10 @@
 
         // 5. Request payment. Spec §2.1 / §7: cash excluded literally.
 
-        // Bail if backend rejected our chargeContext or otherwise rejected the
-        // session — error frame arrived between chargeContext send and this point.
+        // Bail if backend rejected the session — error frame may have arrived
+        // during the WS handoff from order.html or at any point before this.
         // Without this guard the real card would be charged on a session backend
-        // has already discarded. Real-money critical. Per spec §11 (toss-payment-flow.md).
+        // has already discarded. Real-money critical.
         if (isBackendErrorForSession(backendErrorRef, dispatch.sessionId)) {
           // IM-1: close ws before rendering error page so heartbeat timer
           // stops pinging a backend that already errored.
