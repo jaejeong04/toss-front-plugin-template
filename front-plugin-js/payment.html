@@ -153,6 +153,15 @@
         }
       }
 
+      // Escape user-controlled strings before injecting into innerHTML.
+      function escHtml(str) {
+        return String(str)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      }
+
       // ── CUSTOM SUCCESS SCREEN ────────────────────────────────────────
       // Renders the 수납 완료 success screen using custom HTML.
       // spec §3 "Explicitly NOT used": sdk.template.renderResultPage is NOT used.
@@ -160,6 +169,9 @@
       // Auto-redirects to home.html after 5 seconds (matching prior timerMs:5000).
       function renderMedicashSuccessPage(hospitalName, pointUse) {
         const SUCCESS_TIMER_MS = 5000;
+
+        // Declare before innerHTML so the click handler shares the same binding.
+        let countdown = null;
 
         document.getElementById("app").innerHTML = `
           <div class="success-page">
@@ -173,7 +185,7 @@
                 </svg>
               </div>
               <h1 class="success-title">수납 완료</h1>
-              <p class="success-desc">${hospitalName}에\n방문해주셔서 감사합니다</p>
+              <p class="success-desc">${escHtml(hospitalName)}에\n방문해주셔서 감사합니다</p>
               <div class="success-amount-row">
                 <span class="success-amount-label">메디캐시 사용</span>
                 <span class="success-amount-value">${Number(pointUse).toLocaleString()}캐시</span>
@@ -185,18 +197,23 @@
         `;
 
         document.getElementById("successConfirm").addEventListener("click", () => {
+          if (countdown != null) {
+            clearInterval(countdown);
+            countdown = null;
+          }
           location.href = "./home.html";
         });
 
         let remaining = SUCCESS_TIMER_MS / 1000;
         const timerEl = document.getElementById("successTimer");
-        const countdown = setInterval(() => {
+        countdown = setInterval(() => {
           remaining -= 1;
           if (timerEl) {
             timerEl.textContent = `${remaining}초 후 자동으로 이동합니다`;
           }
           if (remaining <= 0) {
             clearInterval(countdown);
+            countdown = null;
             location.href = "./home.html";
           }
         }, 1000);
