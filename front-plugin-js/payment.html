@@ -25,6 +25,92 @@
   </head>
   <body>
     <div id="app"></div>
+    <style>
+      /* ── 수납 완료 success screen ─────────────────────────── */
+      .success-page {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: space-between;
+        height: 100%;
+        background: #fff;
+        padding: 0 24px 32px;
+      }
+
+      .success-body {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        text-align: center;
+      }
+
+      .success-icon-wrap {
+        width: 72px;
+        height: 72px;
+        border-radius: 50%;
+        background: #EBF3FE;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .success-title {
+        font-size: 24px;
+        font-weight: 700;
+        color: #191F28;
+        margin: 0;
+      }
+
+      .success-desc {
+        font-size: 15px;
+        color: #8B95A1;
+        margin: 0;
+        white-space: pre-line;
+        line-height: 1.6;
+      }
+
+      .success-amount-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        width: 100%;
+        padding: 12px 0;
+        border-top: 1px solid #F2F4F6;
+      }
+
+      .success-amount-label {
+        font-size: 15px;
+        color: #4E5968;
+      }
+
+      .success-amount-value {
+        font-size: 15px;
+        font-weight: 600;
+        color: #3182F6;
+      }
+
+      .success-timer {
+        font-size: 13px;
+        color: #B0B8C1;
+        margin: 0;
+      }
+
+      .success-confirm-btn {
+        width: 100%;
+        height: 52px;
+        border-radius: 12px;
+        background: #3182F6;
+        color: #fff;
+        font-size: 17px;
+        font-weight: 600;
+        border: none;
+        cursor: pointer;
+        margin-top: 8px;
+      }
+    </style>
     <script>
       // payment.html — 100% 메디캐시 success-only page.
       //
@@ -65,6 +151,55 @@
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.close();
         }
+      }
+
+      // ── CUSTOM SUCCESS SCREEN ────────────────────────────────────────
+      // Renders the 수납 완료 success screen using custom HTML.
+      // spec §3 "Explicitly NOT used": sdk.template.renderResultPage is NOT used.
+      // spec §6.2: plugin renders custom 수납 완료 success screen.
+      // Auto-redirects to home.html after 5 seconds (matching prior timerMs:5000).
+      function renderMedicashSuccessPage(hospitalName, pointUse) {
+        const SUCCESS_TIMER_MS = 5000;
+
+        document.getElementById("app").innerHTML = `
+          <div class="success-page">
+            <div class="success-body">
+              <div class="success-icon-wrap">
+                <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+                  <circle cx="18" cy="18" r="18" fill="#3182F6"/>
+                  <path d="M10 18.5l5.5 5.5 10.5-11"
+                        stroke="#fff" stroke-width="2.5"
+                        stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </div>
+              <h1 class="success-title">수납 완료</h1>
+              <p class="success-desc">${hospitalName}에\n방문해주셔서 감사합니다</p>
+              <div class="success-amount-row">
+                <span class="success-amount-label">메디캐시 사용</span>
+                <span class="success-amount-value">${Number(pointUse).toLocaleString()}캐시</span>
+              </div>
+            </div>
+            <p class="success-timer" id="successTimer">${SUCCESS_TIMER_MS / 1000}초 후 자동으로 이동합니다</p>
+            <button class="success-confirm-btn" id="successConfirm">확인</button>
+          </div>
+        `;
+
+        document.getElementById("successConfirm").addEventListener("click", () => {
+          location.href = "./home.html";
+        });
+
+        let remaining = SUCCESS_TIMER_MS / 1000;
+        const timerEl = document.getElementById("successTimer");
+        const countdown = setInterval(() => {
+          remaining -= 1;
+          if (timerEl) {
+            timerEl.textContent = `${remaining}초 후 자동으로 이동합니다`;
+          }
+          if (remaining <= 0) {
+            clearInterval(countdown);
+            location.href = "./home.html";
+          }
+        }, 1000);
       }
 
       // ── BOOT ────────────────────────────────────────────────────────
@@ -190,29 +325,12 @@
             sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
 
             // 8. Render the custom 수납 완료 success screen.
-            //    Uses sdk.template.renderResultPage (kept per frontend MD §3
-            //    "Still used: sdk.app.getMerchant").
+            //    spec §3 "Explicitly NOT used": sdk.template.renderResultPage
+            //    is NOT used — custom HTML for 100% 메디캐시 (frontend MD §6.2).
+            //    sdk.app.getMerchant() is still used here (§3 "Still used").
             const { name: hospitalName } = await sdk.app.getMerchant();
             closeWs(ws);
-            sdk.template.renderResultPage({
-              type: "image",
-              status: "success",
-              title: "수납 완료",
-              description: `${hospitalName}에\n 방문해주셔서 감사합니다`,
-              timerMs: 5000,
-              onTimeout: () => { location.href = "./home.html"; },
-              buttons: [
-                {
-                  label: "확인",
-                  onClick: () => { location.href = "./home.html"; },
-                  closeOnClick: true,
-                },
-              ],
-              // Back-arrow on success screen must not blank the WebView.
-              // design doc §3.2: use location.href, NOT sdk.app.setIdle().
-              onBack: () => { location.href = "./home.html"; },
-              localeCode: "ko",
-            });
+            renderMedicashSuccessPage(hospitalName, pointUse);
           } catch (err) {
             console.error("[smartdoctor] payment.html onopen error", err);
             closeWs(ws);
