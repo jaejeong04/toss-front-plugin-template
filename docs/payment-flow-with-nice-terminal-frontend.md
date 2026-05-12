@@ -1,233 +1,395 @@
-# Payment Flow with NICE Terminal — Frontend (Toss FRONT Plugin) Role
+# Payment Flow with NICE Terminal — Frontend (Toss Front Plugin) Role
 
-> **Source of truth:** [docs/payment-flow-with-nice-terminal.md](./payment-flow-with-nice-terminal.md)
+> **Status:** Finalized contract as of 2026-05-12. This document is the source of truth for the Toss Front custom plugin layer in the NICE-paired payment flow.
 >
-> This document is a **role-specific extract** of the Gen-4-converged feasibility review. It describes Toss FRONT plugin responsibilities under the proposed four-party flow. It does **not** restate verdicts or alternatives — for those, read the source-of-truth plan.
+> **Design doc (authoritative):** [docs/superpowers/specs/2026-05-12-nice-paired-final-flow-design.md](./superpowers/specs/2026-05-12-nice-paired-final-flow-design.md). Every flow fact in this document mirrors the design doc verbatim.
 >
-> **Audience:** plugin engineer working in [`front-plugin-js/`](../front-plugin-js/).
-> **Scope:** frontend-only. CRM and backend roles live in [crm](./payment-flow-with-nice-terminal-crm.md) and [backend](./payment-flow-with-nice-terminal-backend.md) sibling docs.
-> **Compiled:** 2026-05-08.
+> **Supersedes:** the 2026-05-08 feasibility-review predecessor that previously lived at this path (based on a flow shape where the plugin owned `sdk.payment.requestPayment`). That shape is no longer valid. Confirmation via Slack thread `C0ANAJW463E` (Toss support, 2026-05-12) established that NICE 카드 단말기 + Toss Front operates in **시리얼통신 기반 리더기 모드**, with Toss firmware auto-overlaying its own 통합결제창 over the plugin during card payment.
+>
+> **Audience:** plugin engineer working in [`front-plugin-js/`](../front-plugin-js/). For backend and CRM responsibilities see the sibling MDs.
 
 ---
 
-## 1. Main flow (shared across all three role docs)
+## 1. Plugin's role in the NICE-paired flow
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant CRM
-    participant Backend
-    participant NICE as 나이스 카드 단말기
-    participant Toss as Toss Front Plugin
+In the finalized 리더기 모드 architecture, the **NICE 카드 단말기** owns card payment end-to-end (VAN, approval, receipt) and **Toss Front firmware** auto-overlays its own 통합결제창 plus auto-`setIdle`s the device when card processing completes. The custom plugin web layer therefore does **NOT** participate in any card-payment SDK call. The plugin's responsibility shrinks to two things: (a) the 메디캐시 selection UI plus `session.chargeContext` send for every session (so backend/CRM know how much, if anything, NICE should charge), and (b) the 100% 메디캐시 success branch — the only path where no card payment occurs and where the plugin therefore must render its own success screen and post the terminal `session.result`.
 
-    Note over CRM,Toss: ── Phase 1: Point selection on Toss FRONT ──
-    CRM->>Backend: session.create
-    Backend->>Toss: session.dispatch (kind=payment) over WS B
-    Note over Toss: renders renderUsePointPage<br/>customer chooses 메디캐시 사용량
-    Toss->>Backend: session.chargeContext (pointUseAmount, chargedSupplyValue, chargedTax)
-    Note over Toss: plugin yields — lifecycle UNVERIFIABLE<br/>(plan §3.2 / dependency map U-LIFE)
-    Backend->>CRM: relay discounted amount (NEW envelope)
-
-    Note over CRM,Toss: ── Phase 2: Card payment via NICE → Toss FRONT ──
-    CRM->>NICE: dispatch card payment with chargedSupplyValue + chargedTax
-    NICE->>Toss: trigger payment (mechanism per plan §3.3 — UNVERIFIABLE)
-    Note over Toss: receives external trigger,<br/>calls sdk.payment.requestPayment
-    Toss->>Toss: requestPayment resolves (SUCCESS|CANCELED|TIMEOUT)
-
-    Note over Toss,Backend: ── Phase 2: Result return ──
-    Toss->>Backend: session.result over WS B
-    Backend->>CRM: session.result (single-source-of-truth: Backend authoritative)
-```
+**Refund is out of scope per design doc §3.3 (pre-existing CRM↔NICE mechanism). The plugin is never involved in any refund path.** No refund-related messages exist on WS B; no plugin code path handles refunds.
 
 ---
 
-## 2. Plugin's responsibilities
+## 2. Plugin pages
 
-### 2.1 Phase 1 — point selection (already implemented)
+Existing pages remain on disk; their scope shrinks. Concrete file references below.
 
-The plugin's phase-1 behavior is essentially the **existing flow** up to the point where today it would call `sdk.payment.requestPayment`. Concretely:
-
-| Responsibility | Current code | Status |
+| File | Role in finalized flow | What's being removed |
 |---|---|---|
-| Idle screen + WS B dispatcher | [home.html:36–294](../front-plugin-js/home.html) | Unchanged |
-| Receive `session.dispatch (kind=payment)` and route to order page | [home.html:144–164](../front-plugin-js/home.html) | Unchanged |
-| Open WS B, send `session.claim` from order page | [order.html:74–94](../front-plugin-js/order.html) | Unchanged |
-| Compute usable 메디캐시 (`floor(min(balance, treatmentTotal) / 100) * 100`) | [order.html:167–173](../front-plugin-js/order.html) | Unchanged |
-| Render `renderUsePointPage` if `usableCash >= minUseAmount` | [order.html:294–324](../front-plugin-js/order.html) | Unchanged |
-| Render `renderOrderPage` after point choice | [order.html:243–285](../front-plugin-js/order.html) | Unchanged (UX decision: keep or skip in new flow) |
-| Send `session.chargeContext` with chosen amounts | [payment.html:126–134](../front-plugin-js/payment.html) | **Move:** sent at end of phase 1 (from order.html) instead of beginning of payment.html |
-
-### 2.2 Phase 1 → Phase 2 transition — UNVERIFIABLE
-
-This is the gating uncertainty for the entire flow (plan §3.2). The plugin must yield after `session.chargeContext` and resume when NICE triggers. Three concrete shapes the implementation could take:
-
-- **Stay foreground** on a Template API "waiting" page (e.g., `renderResultPage` with extended `timerMs` if Toss permits, or a custom waiting template). The `sdk.webSocket` server starts during this wait. NICE connects; the plugin's `listen.message` handler invokes `sdk.payment.requestPayment`.
-- **Return to idle** via `sdk.app.setIdle()`. NICE later triggers a re-mount via an undocumented mechanism (Android intent, VAN signal, or `sdk.webSocket` running on idle WebView). This path is **UNVERIFIABLE** until §6.1 real-device tests.
-- **Two-stage sessions** (plan §5.4 Alternative G). Phase 1 ends with backend in a "point-phase complete" terminal state; phase 2 starts a new sessionId.
-
-The plugin doesn't get to pick this alone — the choice depends on the §6.1 test outcomes and the team's commitment to a backend-state-machine extension. Plugin engineer should treat this as a **design decision delivered from above**, not a plugin-side judgment call.
-
-### 2.3 Phase 2 — card payment (new wiring)
-
-Once phase 2 is triggered (mechanism per plan §3.3), the plugin's responsibility is mostly the **existing payment path** with a different entry point:
-
-| Responsibility | Current code | Status |
-|---|---|---|
-| Open WS B, send `device.register` | [payment.html:575–587](../front-plugin-js/payment.html) | Unchanged |
-| Persist `pendingPayment` before `requestPayment` | [payment.html:197–206](../front-plugin-js/payment.html) | Unchanged |
-| Call `sdk.payment.requestPayment` with `paymentKey`, `tax`, `supplyValue`, `tip`, `excludePaymentTypes: ['CASH']` | [payment.html:222–230](../front-plugin-js/payment.html) | Unchanged |
-| Send `session.result` over WS B with full `tossResponse` | [payment.html:262–271](../front-plugin-js/payment.html) | Unchanged |
-| Render terminal result page (`renderResultPage` success / `renderOrderResultPage` cancelled) | [payment.html:278–366](../front-plugin-js/payment.html) | Unchanged |
-| **Listen for NICE-side trigger via `sdk.webSocket`** | NEW — does not exist today | **NEW** — see §3 below |
-
-### 2.4 Phase 2 result return
-
-The plugin's existing `session.result` send to Backend (over WS B) is the canonical path. The plan recommends Backend as single-source-of-truth (§3.4 of source-of-truth doc). Plugin **does not** also send to NICE unless the §3.4 routing decision changes.
-
-| Responsibility | Current code | Status |
-|---|---|---|
-| `session.result` over WS B (live path) | [payment.html:262–271](../front-plugin-js/payment.html) | Unchanged |
-| `session.result` over WS B with `late: true` (recovery path) | [home.html:204–219](../front-plugin-js/home.html), [config.js:75–88](../front-plugin-js/config.js) | Unchanged |
-| Reply to NICE over `sdk.webSocket` (if §3.4 routing requires) | NEW — if needed | **Optional NEW** — only if the routing-decision changes |
-
-### 2.5 Refund (`requestPaymentCancel`) — unchanged
-
-| Responsibility | Current code | Status |
-|---|---|---|
-| Receive `session.dispatch (kind=cancel)` | [home.html:154–156](../front-plugin-js/home.html) | Unchanged |
-| Call `sdk.payment.requestPaymentCancel(cancelParams)` | [payment.html:385–390](../front-plugin-js/payment.html) | Unchanged |
-| Send `refund.result` over WS B | [payment.html:412–418](../front-plugin-js/payment.html) | Unchanged |
-
-Refund is unaffected by NICE involvement **as long as Toss FRONT itself ran `requestPayment` in phase 2** (the canonical model, plan §4.1). If the team is forced down Alternative E (NICE owns card transaction), refund via Toss SDK becomes IMPOSSIBLE for those payments — the plan flags this; the plugin team should stop reading at that point and escalate.
-
-### 2.6 Recovery — unchanged
-
-| Responsibility | Current code | Status |
-|---|---|---|
-| Read `smartdoctor.pendingPayment` on every page load | [home.html:108–122](../front-plugin-js/home.html), [config.js:39–110](../front-plugin-js/config.js) | Unchanged |
-| Resolve via `sdk.payment.getPayment({ paymentKey })` and post `session.result` with `late: true` | [config.js:71–89](../front-plugin-js/config.js) | Unchanged |
-| Handle `session.reconcile` from Backend on reconnect | [home.html:166–231](../front-plugin-js/home.html) | Unchanged |
-
-### 2.7 Timeout, abort, 100%-메디캐시 skip path
-
-See plan §4.3 / §4.4 / §4.5 for the verdicts. From the plugin's perspective:
-
-- **Timeout:** `sdk.payment.requestPayment` `timeoutMs` semantics unchanged.
-- **`session.abort` (CRM-driven):** existing handlers in [home.html:233–240](../front-plugin-js/home.html), [order.html:121–130](../front-plugin-js/order.html) cover the DISPATCHED-state abort. Phase-1→2 wait-window abort behavior depends on backend state-machine extension — the plugin only acts when WS B delivers an abort frame.
-- **`session.abort` (plugin-driven `USER_BACKED_OUT`):** existing handlers in [order.html:265–283, :308–323](../front-plugin-js/order.html) cover use-point and order pages. If a custom phase-1→2 waiting screen is added, it needs an analogous `onBack` → `session.abort` send.
-- **100%-메디캐시 skip:** existing skip path at [payment.html:142–191](../front-plugin-js/payment.html) is unchanged at the SDK level. Plugin still sends `session.result` with `tossResponse: null` directly, **without involving NICE**. Backend must signal CRM accordingly so CRM does not dispatch to NICE in this case.
+| [`front-plugin-js/home.html`](../front-plugin-js/home.html) | Idle dispatcher. Renders `sdk.template.renderIdlePage`. Opens WS B, sends `device.register`, runs 20s heartbeat with exp-backoff reconnect (capped at 30s, 4403 skips). Listens for `session.dispatch` → stashes payload in `sessionStorage` and navigates to `order.html`. Listens for CRM-driven `session.abort` (valid only in DISPATCHED — plugin never connects to a CREATED session). | The `session.reconcile` handler in `home.html`; the `runPendingPaymentRecovery` invocation from `ws.onopen`; the `dispatch.kind === "cancel"` arm inside the `session.dispatch` handler that routes to `payment.html`; the `recoveredSessions` / `recoveryReady` plumbing that exists only to dedupe reconcile vs recovery. |
+| [`front-plugin-js/order.html`](../front-plugin-js/order.html) | Sends `session.claim` on enter (DISPATCHED → IN_PROGRESS). Renders the custom 메디캐시 selection UI (the medicash-selection render block introduced by commit `7f98300`). On 결제 submit: sends `session.chargeContext`. If `chargedSupplyValue + chargedTax > 0` (card path) the plugin stays put on whatever was on screen — Toss firmware will auto-overlay the 통합결제창. If `charged === 0` (100% 메디캐시) the plugin navigates to `payment.html` for the success-only branch. Also handles `session.abort(USER_BACKED_OUT)` when the user taps back during the medicash UI. | The `renderWaitingScreen` function in `order.html`; the `AWAITS_PROCEED` feature gate around the waiting-screen render; the `session.proceed` case in the WS B message handler; the `waitingForProceed` state variable; the 120s defensive timeout inside the waiting screen. |
+| [`front-plugin-js/payment.html`](../front-plugin-js/payment.html) | **100% 메디캐시 success branch only.** Reads the dispatch payload + `pointUse` from `sessionStorage`, sends `session.result` with `tossResponse: null` and `chargedSupplyValue/chargedTax === 0`, renders the custom 수납 완료 success screen, navigates to `home.html` via `location.href`. Does **not** call `sdk.app.setIdle()` here — known blank-WebView lifecycle bug per design doc §3.2. | Everything else. Specifically: the `runPayment` non-zero-charge branch in `payment.html` and all of its `sdk.payment.requestPayment` plumbing; the `runCancel` flow in `payment.html` and all of its `sdk.payment.requestPaymentCancel` plumbing; `mapTossFailureToKorean`, `mapPaymentMethodToKorean`, `renderBackendErrorPage` (kept only as needed for medicash branch); the `pendingPayment` storage write inside `runPayment`; the `dispatch.kind === "cancel"` arm in the dispatcher. |
+| [`front-plugin-js/settings.html`](../front-plugin-js/settings.html) | Unchanged. Continues to render Toss SN + 시리얼 통신 속도 + 매장명 표시 settings. Not part of the payment flow. | Nothing. |
+| [`front-plugin-js/config.js`](../front-plugin-js/config.js) | Continues to export `BACKEND_HOST`, `CORE_TOKEN`, `backendWsUrl`, `pluginWsUrl`. | The `AWAITS_PROCEED` constant in `config.js`; the `PENDING_KEY` constant; the `runPendingPaymentRecovery` function. |
+| [`front-plugin-js/sdk.js`](../front-plugin-js/sdk.js) | Unchanged. Continues to expose `window.TossFrontSDK` with dev `overrides({ serialNumber, merchant })`. | Nothing. |
 
 ---
 
-## 3. The single new piece of plugin code (conceptually)
+## 3. Toss SDK methods used by the plugin
 
-The only structurally new plugin responsibility under the proposed flow is **hosting an `sdk.webSocket` server that listens for a NICE trigger and invokes `sdk.payment.requestPayment` on receipt**.
+Full enumeration per design doc §5.
 
-The exact wiring (which page hosts the server, what JSON schema NICE sends, how the `paymentKey` reaches the handler, how port discovery happens) is **NOT decidable until §6.1 real-device tests resolve**. Pseudo-code shape only:
+**Still used:**
 
-```js
-// Conceptual — actual wiring depends on plan §6.1 test outcomes
-const server = await sdk.webSocket.start({
-  port: <fixed port or 0>,
-  onMessage: async ({ connectionId, data }) => {
-    const msg = JSON.parse(data);
-    if (msg.type === '<NICE-defined trigger type>') {
-      const result = await sdk.payment.requestPayment({
-        paymentKey: msg.paymentKey,
-        supplyValue: msg.chargedSupplyValue,
-        tax: msg.chargedTax,
-        tip: 0,
-        excludePaymentTypes: ['CASH'],
-      });
-      // result routing per plan §3.4
-    }
-  },
-});
-```
+- `sdk.app.getSerialNumber()` — for `device.register` payload (called in `home.html`, `order.html`, `settings.html`).
+- `sdk.app.getMerchant()` — for merchant name display on success/result screens.
+- `sdk.app.setIdle()` — **only** in `home.html` (idle screen mount via `renderIdlePage`). Never used on `payment.html` for the 100% 메디캐시 success-screen → home transition — that uses `location.href = "./home.html"` to avoid the blank-WebView lifecycle bug.
+- `sdk.app.isDebugMode()` — for dev flags (existing usage).
+- `sdk.storage.get` / `sdk.storage.set` / `sdk.storage.remove` — transient page state only. **No longer used for `pendingPayment` recovery.**
+- `sdk.template.renderIdlePage` — `home.html` idle screen.
+- `sdk.template.openToast` — error/abort toasts in `order.html`.
+- `sdk.template.renderOrderPage` — usage TBD per design doc §5; may be kept for receipt-style display or replaced with custom HTML during medicash UI implementation.
 
-**Do not implement this until** the team has resolved at minimum:
+**Explicitly NOT used (replaced with custom HTML per commit `7f98300`):**
 
-- Plan §6.1 #1 (foreground/idle behavior of `sdk.webSocket` server)
-- Plan §6.1 #2 (external-wake from idle, if needed)
-- Plan §6.3 #9 (teammate-anecdote — what specifically did NICE do?)
-- Plan §6.3 #10 (NICE's protocol with Toss FRONT)
+- `sdk.template.renderUsePointPage` — replaced by `renderMedicashPage()` in `order.html`.
+- `sdk.template.renderResultPage` — firmware handles result for the card path; `payment.html` uses custom HTML for the 100% 메디캐시 success screen.
 
-Implementing `sdk.webSocket` wiring against assumed semantics will produce a plugin that passes local testing but breaks in production.
+**Removed entirely (no longer present anywhere in the plugin):**
+
+- `sdk.payment.requestPayment` — firmware owns card payment; plugin has nothing to request.
+- `sdk.payment.requestPaymentCancel` — refund is out of scope per design doc §3.3 (pre-existing CRM↔NICE refund mechanism); the plugin is not involved.
+- `sdk.payment.getPayment` — no pending-payment recovery means no lookups by `paymentKey`.
 
 ---
 
-## 4. What stays the same (sanity-check list)
+## 4. Wire messages (WS B — Plugin ↔ BE)
 
-The following plugin behaviors are **identical** between today's implementation and the proposed flow:
+WS B URL: `wss://<core>/ws/plugin?serial=<deviceSerialNumber>&token=<coreToken>` ([`config.js:32–39`](../front-plugin-js/config.js)). Connect from `home.html` (long-lived) and `order.html` (per-session).
 
-- WS B URL builder ([config.js:24–31](../front-plugin-js/config.js))
-- `device.register` first-message contract ([home.html:93–98](../front-plugin-js/home.html))
-- 20s heartbeat, 3-miss drop ([home.html:102–106](../front-plugin-js/home.html))
-- Reconnect with exponential backoff up to 30s, skip on 4403 ([home.html:54–67, :270–287](../front-plugin-js/home.html))
-- pendingPayment storage shape: `{ sessionId, paymentKey, pointUseAmount, chargedSupplyValue, chargedTax }` ([config.js, payment.html:197–206](../front-plugin-js/config.js))
-- `session.chargeContext` payload shape (plan §6 of [docs/superpowers/specs/toss-payment-flow.md](./superpowers/specs/toss-payment-flow.md))
-- `session.result` payload shape including `late: true` semantics
-- 100%-메디캐시 skip path (`tossResponse: null`)
-- Refund flow (`refund.result` shape)
-- Error-frame handling and back-arrow navigation rules
+> Heartbeat is handled at the WebSocket transport layer (legacy convention from `toss-payment-flow.md`); not a plugin-application concern. The plugin-application message tables below do not list `ping`/`pong`.
 
----
+### 4.1 Plugin → BE
 
-## 5. What's new (delta)
+| Message | Purpose | Trigger |
+|---|---|---|
+| `device.register` | Register `serialNumber` (and `sdkVersion: "v0"`) with backend — first frame on every connect. | Plugin connects (ws.onopen on `home.html` / `order.html`). |
+| `session.claim` | Plugin is engaged with the order/medicash UI; backend transitions DISPATCHED → IN_PROGRESS. | `order.html` `ws.onopen`, right after `device.register`. |
+| `session.chargeContext` | Discounted amount after medicash selection. Backend decides (and forwards to CRM) whether NICE should be dispatched (`chargedSupplyValue + chargedTax > 0`) or skipped (== 0). | User clicks the medicash 결제 button in `order.html` (`handlePointChoice`). |
+| `session.result` | **100% 메디캐시 success only.** Terminal `tossResponse: null` payload with zero charge values. | `payment.html` enters and detects 0-charge from `sessionStorage`. |
+| `session.abort` | User backed out of medicash UI — `reason: "USER_BACKED_OUT"`. Only valid window for plugin-initiated abort is medicash selection (pre-`chargeContext`). | User taps back arrow on `order.html` medicash page (`sendAbortAndGoHome`). |
 
-| Change | When (gated by) |
+### 4.2 BE → Plugin
+
+| Message | Purpose |
 |---|---|
-| Move `session.chargeContext` send from payment.html to end of phase 1 (order.html) | After backend's contract for the new phase-1→2 boundary is decided (CRM-side §3.1 last row of plan) |
-| Custom phase-1→2 "waiting" screen | After §6.1 real-device tests confirm whether plugin must stay foreground |
-| `sdk.webSocket` server wiring + NICE-trigger handler | After §6.1 #1, §6.1 #2, §6.3 #9, §6.3 #10 resolve |
-| Phase-2 entry no longer dispatched by Backend `session.dispatch` | Same as above — depends on whether Backend keeps a fallback dispatch path |
+| `device.registered` | Ack for `device.register`. Log only. |
+| `session.dispatch` | Start a new session. Payload simplified — see §4.3. |
+| `session.abort` | CRM-driven abort relayed by backend. **Only valid in DISPATCHED** — plugin never connects to a CREATED session. Carries `reason: "ABORTED_BY_CRM"`. Plugin navigates to `home.html` via `location.href` (see §4.3 example). |
+| `error` | Per existing §11 error-frame contract (toss-payment-flow.md §11). See §7.6 for plugin handling. |
+
+### 4.3 Envelope examples
+
+**`session.dispatch` (BE → Plugin) — simplified per design doc §4.3:**
+
+```json
+{
+  "type": "session.dispatch",
+  "payload": {
+    "sessionId": "{sessionId}",
+    "amount": {
+      "supplyValue": 27273,
+      "tax": 2727,
+      "tip": 0
+    },
+    "orderSnapshot": {},
+    "pointContext": {}
+  }
+}
+```
+
+Dropped from legacy: `kind`, `paymentKey`, `timeoutMs`, `excludePaymentTypes` — all were Toss-SDK-specific and no longer apply.
+
+**`session.chargeContext` (Plugin → BE):**
+
+```json
+{
+  "type": "session.chargeContext",
+  "payload": {
+    "sessionId": "{sessionId}",
+    "pointUseAmount": 1000,
+    "chargedSupplyValue": 26364,
+    "chargedTax": 2636
+  }
+}
+```
+
+Backend validates that `pointUseAmount + chargedSupplyValue + chargedTax + tip == original total`. Plugin computes `tax = Math.floor(charged / 11)` and `supplyValue = charged - tax` (same arithmetic as today — see `handlePointChoice` in `order.html`).
+
+**`session.result` (Plugin → BE — 100% 메디캐시 only):**
+
+```json
+{
+  "type": "session.result",
+  "payload": {
+    "sessionId": "{sessionId}",
+    "pointUseAmount": 30000,
+    "chargedSupplyValue": 0,
+    "chargedTax": 0,
+    "tossResponse": null
+  }
+}
+```
+
+Sent immediately after `chargeContext` (back-to-back) when the user covered the entire total with 메디캐시. Plugin then renders its custom 수납 완료 screen and navigates `location.href = "./home.html"`.
+
+**`session.abort` (Plugin → BE):**
+
+```json
+{
+  "type": "session.abort",
+  "payload": {
+    "sessionId": "{sessionId}",
+    "reason": "USER_BACKED_OUT"
+  }
+}
+```
+
+BE relays `USER_BACKED_OUT` on the terminal echo to CRM as `session.result(failureReason: "USER_BACKED_OUT")`. See design doc §4.3 for the full `failureReason` enum.
+
+**`session.abort` (BE → Plugin):**
+
+```json
+{
+  "type": "session.abort",
+  "payload": {
+    "sessionId": "{sessionId}",
+    "reason": "ABORTED_BY_CRM"
+  }
+}
+```
+
+Sent only when CRM aborts a DISPATCHED session. Plugin response: navigate to `home.html` via `location.href` (do **NOT** call `sdk.app.setIdle()` — known blank-WebView lifecycle bug per design doc §3.2). Plugin should NOT receive `session.abort` if it has already sent `session.claim` and progressed past `session.chargeContext` — post-claim CRM aborts during NICE phase go out-of-band via the CRM↔NICE channel and the plugin is not notified (design doc §6 "Aborts").
 
 ---
 
-## 6. Open questions affecting frontend specifically
+## 5. State machine — plugin's POV
 
-These are extracted from plan §6 — only the items that have plugin-side impact:
+Subset of design doc §2 that the plugin actually observes or triggers. The plugin has no visibility into CREATED (CRM-only) or into terminal states reached purely by CRM/BE timers.
 
-| # | Plan ref | Question | Why it matters to frontend |
+| From | To | Trigger | Plugin's role |
 |---|---|---|---|
-| 1 | §6.1 #1 | Does `sdk.webSocket` server keep accepting connections while plugin is on `renderIdlePage`? | Determines whether phase-2 can trigger from idle |
-| 2 | §6.1 #2 | Is there ANY mechanism to bring plugin to foreground from idle? | Ditto |
-| 3 | §6.1 #3 | `sessionStorage` durability across `setIdle()` | Determines whether phase-1 stash survives a yield |
-| 4 | §6.1 #4 | `renderResultPage` `timerMs` upper bound | Constrains the "stay foreground" alternative |
-| 5 | §6.2 #6 | `navigation.html` (403) | Independent — plugin uses plain browser navigation today |
-| 6 | §6.2 #7 | `sdk.webSocket` auth/trust | Determines whether plugin needs to validate incoming NICE messages |
-| 7 | §6.3 #9 | Teammate-anecdote: what specifically triggered Toss FRONT? | Highest-leverage single answer |
-| 8 | §6.3 #10 | NICE's protocol with Toss FRONT | Defines the message schema the plugin handler must parse |
+| CREATED | DISPATCHED | `session.dispatch` sent by BE | Plugin **observes**: receives frame in `home.html`, stashes payload, navigates to `order.html`. |
+| DISPATCHED | IN_PROGRESS | `session.claim` | Plugin **triggers**: `order.html` `ws.onopen` sends it. |
+| DISPATCHED | CANCELED | `session.abort` (CRM-origin, `reason: "ABORTED_BY_CRM"`) | Plugin **observes**: receives `session.abort` frame on `home.html` (or `order.html` if races), navigates to `home.html` via `location.href`. Valid only in DISPATCHED (plugin never connects to a CREATED session). |
+| IN_PROGRESS | CANCELED | `session.abort(USER_BACKED_OUT)` | Plugin **triggers**: only valid window is during medicash UI (pre-`chargeContext`). |
+| IN_PROGRESS | SUCCEEDED (100% 메디캐시) | `session.result(tossResponse: null)` | Plugin **triggers**: sent from `payment.html` 0-charge branch. |
+| IN_PROGRESS | SUCCEEDED (card) | `session.result(niceResponse, status: SUCCEEDED)` from CRM | Plugin **not involved**: terminal reached over WS A; plugin's screen is being overlaid by firmware 통합결제창; firmware auto-`setIdle`s on completion. |
+| IN_PROGRESS | FAILED (card) | `session.result(niceResponse, status: FAILED)` from CRM | Plugin **not involved**. |
+| IN_PROGRESS | CANCELED (NICE-side) | `session.result(status: CANCELED)` from CRM | Plugin **not involved**: CRM aborts NICE out-of-band, then echoes terminal. |
+| IN_PROGRESS | EXPIRED | BE timer (extended window, design doc §6) | Plugin **not involved**. |
+
+**Critical contract change vs legacy:** after `session.claim` the plugin path is **no longer abortable** by the plugin once `session.chargeContext` has been sent. The plugin's only IN_PROGRESS abort window is the medicash selection screen.
+
+**Terminal-state observation:** the plugin does **not** directly observe terminal states (SUCCEEDED/FAILED/CANCELED/EXPIRED) over WS B. Per design doc §4.2, BE→CRM `session.status` only carries DISPATCHED + IN_PROGRESS — terminal states go via `session.result` from BE to **CRM**, never to plugin. The plugin's primary signal that a session is done is the absence of further frames + the eventual mount of a new `session.dispatch` for a different session (or the plugin already being idle on `home.html` after its own terminal action). For 100% 메디캐시 the plugin observes its own terminal because the plugin is the originator of `session.result`. For card path the plugin's screen is being overlaid by firmware and firmware auto-`setIdle`s on completion.
+
+> Legacy `TIMEOUT` terminal is retained in persistence for backcompat but not emitted by the new state machine. The plugin never directly sees `EXPIRED` either — that terminal arrives via BE→CRM `session.result(EXPIRED)`, not WS B.
 
 ---
 
-## 7. Hand-off to plugin engineer
+## 6. End-to-end flows — plugin POV
 
-If the team commits to the new flow, the plugin work splits into three blocks ordered by gating:
+### 6.1 Card-payment happy path (design doc §3.1)
 
-1. **Pre-test block** (no Toss SDK uncertainty):
-   - Move `session.chargeContext` from payment.html to order.html
-   - Coordinate the new phase-1→2 boundary message with backend dev
-   - No `sdk.webSocket` wiring yet
-2. **Post-test block** (after §6.1 / §6.3 resolutions):
-   - Pick a phase-1→2 waiting strategy (foreground vs. external-wake vs. two-stage)
-   - Wire `sdk.webSocket` server with NICE message handler
-   - Decide phase-2 trigger fallback (does Backend `session.dispatch` still exist as a backup?)
-3. **Polish block:**
-   - Update `[GAP]` ledger in [docs/superpowers/specs/2026-04-27-frontend-plugin.md](./superpowers/specs/2026-04-27-frontend-plugin.md) with verified answers
-   - Update [docs/superpowers/specs/toss-payment-flow.md](./superpowers/specs/toss-payment-flow.md) to reflect the new contract once stabilized
+```
+CRM → BE              session.create
+BE → Plugin           session.dispatch                  [home.html receives]
+                                                        [home.html stashes payload,
+                                                         navigates to order.html]
+
+Plugin → BE           session.claim                     [order.html ws.onopen]
+
+[order.html renders custom 메디캐시 selection UI]
+[Customer selects partial-medicash or 사용 안함, taps 결제]
+
+Plugin → BE           session.chargeContext             [charged > 0]
+                                                        [BE forwards to CRM
+                                                         via WS A]
+
+[Plugin stays on whatever screen — does NOT navigate]
+[CRM dispatches card payment to NICE out-of-band]
+[Toss firmware auto-overlays plugin screen with 통합결제창]
+[NICE ↔ Toss Front via VAN/serial — opaque to plugin]
+[NICE returns approval to CRM]
+
+CRM → BE              session.result (SUCCEEDED, niceResponse)   [WS A]
+BE → CRM              session.result (terminal echo)
+
+[Toss firmware: auto-setIdle on Toss Front device]
+[Plugin next page load returns to home.html]
+```
+
+Plugin does **not** observe the card outcome over WS B. Plugin does **not** render a card-side success/failure page. The firmware handles the visual transition.
+
+### 6.2 100% 메디캐시 happy path (design doc §3.2)
+
+```
+CRM → BE              session.create
+BE → Plugin           session.dispatch                  [home.html receives]
+                                                        [navigates to order.html]
+
+Plugin → BE           session.claim                     [order.html ws.onopen]
+
+[order.html renders 메디캐시 selection UI]
+[Customer chooses 전액 사용 — covers entire total]
+
+Plugin → BE           session.chargeContext             [chargedSupplyValue=0,
+                                                         chargedTax=0,
+                                                         pointUseAmount=total]
+                                                        [BE forwards to CRM]
+                                                        [CRM detects 0 charge,
+                                                         does NOT dispatch NICE]
+
+[order.html navigates to payment.html#sessionId
+ (charged === 0 branch)]
+
+Plugin → BE           session.result                    [tossResponse: null,
+                                                         chargedSupplyValue=0,
+                                                         chargedTax=0]
+                                                        [back-to-back after
+                                                         chargeContext]
+
+[payment.html renders custom 수납 완료 success screen
+ (no sdk.template.renderResultPage)]
+[After timer / 확인 tap:
+ location.href = "./home.html"
+ — NOT sdk.app.setIdle() — known blank-screen bug]
+```
 
 ---
 
-## 8. References
+## 7. Edge cases — plugin POV
 
-- **Source of truth (plan):** [docs/payment-flow-with-nice-terminal.md](./payment-flow-with-nice-terminal.md)
-- **Companion role docs:**
+### 7.1 Plugin disconnects (design doc §6)
+
+| When | What plugin sees / does |
+|---|---|
+| After `device.register`, before `session.claim` | WS dropped. Reconnect with exp-backoff (existing `home.html` loop). Backend may have already transitioned the session to FAILED (`PLUGIN_UNRESPONSIVE`) after 30s grace — on reconnect, plugin just re-registers and waits for the next `session.dispatch`. No reconcile expected. |
+| After `session.claim`, before `session.chargeContext` | WS dropped. Backend will EXPIRE the session after the extended IN_PROGRESS timeout (recommended ≥180s per design doc §6, exact value owned by backend). Plugin reverts to `home.html` on reconnect; no recovery action. |
+| After `session.chargeContext` (card path) | Irrelevant to plugin. The card flow continues CRM↔NICE↔CRM↔BE; terminal arrives over WS A. Plugin has no further role. |
+| After `session.chargeContext` (100% 메디캐시), before `session.result` | Narrow window. Session expires per BE timer policy — **no recovery on the plugin side**. Plugin re-mounts `home.html` on reconnect; backend's terminal state stands. |
+| After `session.result` (100% 메디캐시) | Session is already terminal. Disconnect is irrelevant. |
+
+**On plugin reconnect during an in-flight session:** backend does **NOT** send `session.reconcile`. The plugin has no recovery responsibility — the card path is fully owned by CRM↔NICE, and the 100% 메디캐시 path is best-effort one-shot.
+
+### 7.2 Aborts (design doc §6)
+
+| Scenario | Plugin's role |
+|---|---|
+| CRM aborts before plugin claims (CREATED) | Plugin never receives `session.dispatch` (plugin is never connected to a CREATED session). No-op for plugin. |
+| CRM aborts after dispatch but before claim is en route (DISPATCHED) | BE → Plugin: `session.abort(reason: "ABORTED_BY_CRM")` arrives on `home.html` (or `order.html` if races). Plugin navigates to `home.html` via `location.href` (toast on `order.html` — existing `session.abort` handler in `order.html`). Valid only in DISPATCHED. |
+| User backs out during medicash UI (post-claim, pre-`chargeContext`) | Plugin sends `session.abort(reason: "USER_BACKED_OUT")` over WS B. Back to `home.html`. (`sendAbortAndGoHome` helper in `order.html`.) |
+| CRM aborts during NICE phase (post-`chargeContext`, card path) | **Out-of-band on CRM↔NICE.** CRM then relays `session.result(status: CANCELED)` over WS A to BE. Plugin is **not** notified; firmware closes the 통합결제창 on its own. |
+| User attempts to abort during card phase | **Not possible.** Toss firmware's 통합결제창 owns the screen; plugin has no UI to surface a back button. |
+
+### 7.3 Timeout
+
+- **DISPATCHED > 30s, no `session.claim`** → BE terminates as `FAILED / PLUGIN_UNRESPONSIVE`. Plugin learns nothing directly; on reconnect it just waits for next dispatch.
+- **IN_PROGRESS > extended timeout (recommended ≥180s)** → BE terminates as `EXPIRED`. Plugin learns nothing directly. Exact timeout value is a backend-owned open item (see §9).
+
+### 7.4 NICE-side failure (card path)
+
+Card declined, VAN error, NICE offline, etc.: NICE → CRM → BE: `session.result(status: FAILED, niceResponse: {…})`. BE persists, does **not** deduct medicash. Plugin is **not** notified; firmware closes 통합결제창 and auto-`setIdle`s the device.
+
+### 7.5 Late CRM `session.result` after BE EXPIRED
+
+If CRM relays a NICE-terminal `session.result` (SUCCEEDED / FAILED / CANCELED) *after* BE has already marked the session EXPIRED, BE rejects it with `error: INVALID_STATE` (per `toss-payment-flow.md §11`) and does not mutate session state. CRM must not retry. If NICE actually approved (orphan card charge), CRM owns recovery via the **pre-existing CRM↔NICE refund mechanism** (design doc §3.3) — refund flow is entirely out of scope for this contract.
+
+The plugin is **not** involved in either the rejection or any subsequent recovery. By the time this scenario fires, the plugin has long since returned to `home.html` waiting for the next `session.dispatch`. No plugin code path is needed.
+
+> Orphaned NICE Recovery (formerly a separate sub-flow) is **gone** — it is now subsumed under design doc §3.3's "pre-existing CRM↔NICE refund mechanism." There is no `refund.create` against EXPIRED with CRM-supplied `niceResponse` in the NICE-paired contract; the pre-existing refund infrastructure handles it.
+
+### 7.6 Plugin receives an `error` frame for a plugin-originated message
+
+If BE responds to a plugin-originated message (e.g., `session.chargeContext`, `session.claim`, `session.result`) with an `error` frame per `toss-payment-flow.md §11`:
+
+- Plugin surfaces a toast via `sdk.template.openToast` describing the failure (e.g., showing `error.payload.message`).
+- Plugin navigates to `home.html` via `location.href`. The session is unrecoverable from plugin side.
+- Plugin does **NOT** retry. BE has already terminated the session if the error was substantive.
+
+See design doc §6 ("Plugin receives an `error` frame for a plugin-originated message").
+
+### 7.7 Plugin reconnect after BE EXPIRED
+
+When the plugin reconnects after BE has already marked an in-flight session EXPIRED:
+
+- BE acks `device.register` with `device.registered`.
+- BE does **NOT** send `session.dispatch` for the EXPIRED session.
+- Plugin remains idle on `home.html` waiting for a new `session.dispatch`.
+
+See design doc §6 ("Plugin reconnect after BE EXPIRED").
+
+### 7.8 메디캐시 deduction failure on SUCCEEDED (informational only)
+
+If BE encounters a Hospital-side 메디캐시 deduction failure after terminal SUCCEEDED, BE will emit a CRM-side `error` frame with code `MEDICASH_DEDUCT_PENDING` and async-retry the deduction. **The plugin is not involved** — this failure mode is invisible to the plugin and doesn't change the SUCCEEDED flow on the Toss Front side. Documented here for completeness; no plugin code path required. See design doc §6 ("Medicash deduction failure on SUCCEEDED").
+
+---
+
+## 8. What's removed vs legacy (cleanup-planning input)
+
+For the frontend team's cleanup execution plan. All paths absolute from repo root.
+
+> Code locations referenced by function/section name to avoid line-number drift as cleanup commits land.
+
+**WS B contract — plugin-side removals (design doc §7):**
+
+- `session.proceed` listener handling (was the `session.proceed` case in the `order.html` WS B message handler)
+- `session.reconcile` handler (was the `session.reconcile` handler in `home.html`)
+- `getPayment` recovery path
+- `pendingPayment` storage write + `runPendingPaymentRecovery` call
+- `AWAITS_PROCEED` feature flag + waiting screen
+- All `sdk.payment.*` SDK calls
+- `session.dispatch(kind: "cancel")` handler arm
+
+**Plugin code removals (concrete sites):**
+
+- [`front-plugin-js/payment.html`](../front-plugin-js/payment.html) — the `runPayment` non-zero-charge branch including the `sdk.payment.requestPayment` call, retry/error pages, `mapTossFailureToKorean`, `mapPaymentMethodToKorean` (if no longer needed on the 100% medicash branch), and the `pendingPayment` storage write.
+- [`front-plugin-js/payment.html`](../front-plugin-js/payment.html) — the `runCancel` function in its entirety and its dispatcher arm (the `dispatch.kind === "cancel"` branch in the WS B message handler).
+- [`front-plugin-js/home.html`](../front-plugin-js/home.html) — the `runPendingPaymentRecovery` invocation from `ws.onopen`, the `recoveredSessions` Set, the `recoveryReady` promise, and the `session.reconcile` handler.
+- [`front-plugin-js/home.html`](../front-plugin-js/home.html) — the `dispatch.kind === "cancel"` arm inside the `session.dispatch` handler.
+- [`front-plugin-js/order.html`](../front-plugin-js/order.html) — the `renderWaitingScreen()` function, the `waitingForProceed` state variable, the `AWAITS_PROCEED` gate around the waiting-screen render, and the `session.proceed` case in the WS B message handler.
+- [`front-plugin-js/config.js`](../front-plugin-js/config.js) — the `AWAITS_PROCEED` constant, the `PENDING_KEY` constant, and the `runPendingPaymentRecovery` function.
+
+**Spec doc removals (design doc §7):**
+
+- [`docs/superpowers/specs/toss-payment-flow.md` §5.5](./superpowers/specs/toss-payment-flow.md) (`session.proceed` contract) — obsolete.
+- [`docs/superpowers/specs/toss-payment-flow.md` §9](./superpowers/specs/toss-payment-flow.md) (timeout-and-reconcile sub-flow) — partially obsolete; the IN_PROGRESS timeout concept survives but reconcile is gone.
+
+---
+
+## 9. Open items / TBDs (frontend-touching only)
+
+From design doc §8. Only items that touch the plugin are listed here; backend/CRM-only items are not the plugin's concern.
+
+| Item | Owner | Plugin impact |
+|---|---|---|
+| Exact IN_PROGRESS timeout value (recommended 180s) | Backend | Plugin observes nothing directly. Affects how long a user can sit on the medicash UI before backend expires. No plugin code change either way. |
+| `niceResponse` envelope shape (vendor-specific) | CRM + Backend | None — plugin never receives `niceResponse`. |
+| Cleanup of obsolete plugin code (separate execution plan) | **Frontend** | This is our action item. See §8 for the concrete file/line inventory. |
+
+No other TBDs in design doc §8 touch the frontend.
+
+---
+
+## 10. References
+
+- **Design doc (authoritative):** [docs/superpowers/specs/2026-05-12-nice-paired-final-flow-design.md](./superpowers/specs/2026-05-12-nice-paired-final-flow-design.md)
+- **Sibling MDs:**
   - [docs/payment-flow-with-nice-terminal-backend.md](./payment-flow-with-nice-terminal-backend.md)
   - [docs/payment-flow-with-nice-terminal-crm.md](./payment-flow-with-nice-terminal-crm.md)
-- **Verified Toss SDK reference (this repo):**
-  - [docs/superpowers/specs/2026-04-27-frontend-plugin.md](./superpowers/specs/2026-04-27-frontend-plugin.md)
-- **Current Backend ↔ Plugin protocol spec:**
-  - [docs/superpowers/specs/toss-payment-flow.md](./superpowers/specs/toss-payment-flow.md)
+- **Existing WS B protocol spec (legacy reference — being trimmed per §8):** [docs/superpowers/specs/toss-payment-flow.md](./superpowers/specs/toss-payment-flow.md)
 - **Plugin source:**
-  - [front-plugin-js/home.html](../front-plugin-js/home.html), [order.html](../front-plugin-js/order.html), [payment.html](../front-plugin-js/payment.html), [config.js](../front-plugin-js/config.js)
+  - [front-plugin-js/home.html](../front-plugin-js/home.html)
+  - [front-plugin-js/order.html](../front-plugin-js/order.html)
+  - [front-plugin-js/payment.html](../front-plugin-js/payment.html)
+  - [front-plugin-js/settings.html](../front-plugin-js/settings.html)
+  - [front-plugin-js/config.js](../front-plugin-js/config.js)
+  - [front-plugin-js/sdk.js](../front-plugin-js/sdk.js)

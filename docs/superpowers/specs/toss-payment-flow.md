@@ -1,5 +1,7 @@
 # Toss Payment Backend Flow
 
+> **⚠️ Partially SUPERSEDED 2026-05-12 for NICE-paired production.** The following sections are obsolete under the NICE-paired contract: §5.5 (`session.proceed`), §9 (timeout-and-reconcile sub-flow for plugin recovery), **§10 (entire plugin-mediated refund flow — refund is out of scope in the NICE-paired contract; uses pre-existing CRM↔NICE mechanism + pre-existing backend 메디캐시 reversal infrastructure)**, the Data Ownership bullets claiming Core owns `session.proceed` dispatch and skip-NICE signaling, the Plugin Data Ownership bullets claiming Toss SDK calls / requestPaymentCancel / getPayment recovery, and the State Summary's `TIMEOUT` terminal state (NICE-paired flow emits `EXPIRED` only). **Source of truth for the NICE-paired flow:** [`2026-05-12-nice-paired-final-flow-design.md`](./2026-05-12-nice-paired-final-flow-design.md) and the three role-specific MDs at [`../payment-flow-with-nice-terminal-{frontend,backend,crm}.md`](../payment-flow-with-nice-terminal-frontend.md). The remainder of this document — Hospital Feign endpoint inventory, base `session.create` / `session.abort` contracts, error frame §11, pointContext auto-enrichment rules — remains authoritative.
+
 이 문서는 Toss Front Plugin 결제 flow에서 CRM, core, hospital, plugin 사이의 API/WebSocket 신호를 정렬한 문서다.
 
 ## 전제
