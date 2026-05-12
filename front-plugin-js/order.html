@@ -52,7 +52,6 @@
 
         const ws = new WebSocket(window.smartdoctor.pluginWsUrl(serialNumber));
         let heartbeatTimer = null;
-        let waitingForProceed = false;
 
         function sendAbortAndGoHome() {
           if (ws.readyState === WebSocket.OPEN) {
@@ -108,23 +107,17 @@
               case "pong":
                 return;
 
-              case "session.proceed": {
-                if (waitingForProceed && msg.payload?.sessionId === sessionId) {
-                  waitingForProceed = false;
-                  closeWs(ws);
-                  location.href = "./payment.html#" + sessionId;
-                }
-                return;
-              }
-
               case "session.abort": {
+                // CRM-driven abort (ABORTED_BY_CRM) — valid race window while
+                // plugin is on the medicash UI. Per frontend MD §4.2 + §7.2:
+                // navigate to home.html via location.href (NOT sdk.app.setIdle()).
                 ws.onmessage = null;
                 console.log(
                   "[smartdoctor] order.html session.abort",
                   msg.payload,
                 );
                 await sdk.template.openToast({
-                  message: "세션이 종료되었어요",
+                  message: "결제가 취소되었습니다.",
                   icon: "error",
                 });
                 closeWs(ws);
@@ -133,6 +126,8 @@
               }
 
               case "error": {
+                // Per frontend MD §7.6 + design doc §6: surface toast, navigate
+                // to home.html via location.href, do NOT retry.
                 ws.onmessage = null;
                 const p = msg.payload || {};
                 console.warn(
@@ -205,23 +200,21 @@
           );
 
           if (charged === 0) {
+            // 100% 메디캐시 path: navigate to payment.html for the success-only
+            // branch. Per frontend MD §6.2.
             closeWs(ws);
             location.href = "./payment.html#" + sessionId;
             return;
           }
 
-          // Feature gate: until backend ships session.proceed, fall back to
-          // the pre-restructure flow (navigate directly to payment.html after
-          // chargeContext). Flip AWAITS_PROCEED in config.js once backend +
-          // CRM + NICE are ready.
-          if (!window.smartdoctor.config.AWAITS_PROCEED) {
-            closeWs(ws);
-            location.href = "./payment.html#" + sessionId;
-            return;
-          }
-
-          waitingForProceed = true;
-          renderWaitingScreen();
+          // Card path (charged > 0): plugin's role ends after sending
+          // session.chargeContext. Per frontend MD §6.1 the plugin stays on
+          // whatever screen — Toss firmware will auto-overlay 통합결제창 and
+          // auto-setIdle on completion. Show an informational toast so the user
+          // knows to look at the terminal.
+          sdk.template.openToast({
+            message: "결제 단말기에서 카드를 확인해주세요.",
+          });
         }
 
         function renderMedicashPage() {
@@ -274,49 +267,6 @@
             "click",
             () => handlePointChoice(usableCash),
           );
-        }
-
-        function renderWaitingScreen() {
-          document.getElementById("app").innerHTML = `
-            <div class="waiting-page">
-              <div class="waiting-header">
-                <button class="medicash-back" id="waitingBack">
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-                    <path d="M15 18l-6-6 6-6" stroke="#191F28" stroke-width="2"
-                          stroke-linecap="round" stroke-linejoin="round"/>
-                  </svg>
-                </button>
-              </div>
-              <div class="waiting-body">
-                <div class="waiting-spinner"></div>
-                <p class="waiting-message">카드 단말기에서<br>결제를 진행해주세요</p>
-              </div>
-            </div>
-          `;
-
-          document.getElementById("waitingBack").addEventListener(
-            "click",
-            sendAbortAndGoHome,
-          );
-
-          // Defensive timeout: if session.proceed never arrives (WS dropped
-          // silently, backend bug, or NICE never triggered), escape after
-          // 120s instead of leaving the user stuck on the spinner. Backend's
-          // IN_PROGRESS expiry (timeoutMs + 30s) will also fire eventually
-          // but plugin needs its own escape hatch.
-          setTimeout(async () => {
-            if (!waitingForProceed) return;
-            waitingForProceed = false;
-            try {
-              await sdk.template.openToast({
-                message: "결제 단말기 응답이 늦어지고 있어요",
-                icon: "error",
-              });
-            } catch (e) {
-              console.warn("[smartdoctor] order.html waiting timeout toast failed", e);
-            }
-            sendAbortAndGoHome();
-          }, 120000);
         }
 
         if (usableCash >= minUse && usableCash > 0) {
