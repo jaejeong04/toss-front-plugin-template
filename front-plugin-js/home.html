@@ -190,6 +190,13 @@
           };
 
           ws.onerror = (ev) => {
+            // Mirror ws.onclose cleanup: in some non-standard teardowns onerror
+            // can fire without an immediately-following onclose, leaving the
+            // heartbeat firing on a dead socket. Cheap to clear defensively.
+            if (heartbeatTimer != null) {
+              clearInterval(heartbeatTimer);
+              heartbeatTimer = null;
+            }
             console.warn("[smartdoctor] ws error", ev);
           };
         }
