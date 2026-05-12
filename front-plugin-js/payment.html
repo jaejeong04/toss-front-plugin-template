@@ -224,7 +224,8 @@
         // 1. Dispatch payload — stashed by order.html before navigating here.
         const dispatchJson = sessionStorage.getItem("smartdoctor.dispatch");
         const dispatch = dispatchJson ? JSON.parse(dispatchJson) : null;
-        if (!dispatch) {
+        const sessionId = location.hash.slice(1);
+        if (!dispatch || (sessionId && dispatch.sessionId !== sessionId)) {
           location.href = "./home.html";
           return;
         }

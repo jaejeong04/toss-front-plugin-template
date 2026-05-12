@@ -39,11 +39,7 @@
 
         const dispatchJson = sessionStorage.getItem("smartdoctor.dispatch");
         const dispatch = dispatchJson ? JSON.parse(dispatchJson) : null;
-        if (
-          !dispatch ||
-          dispatch.kind !== "payment" ||
-          dispatch.sessionId !== sessionId
-        ) {
+        if (!dispatch || dispatch.sessionId !== sessionId) {
           location.href = "./home.html";
           return;
         }
