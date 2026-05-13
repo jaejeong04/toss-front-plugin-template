@@ -177,6 +177,11 @@
         const usableCash = computeUsableCash(dispatch);
         const treatmentTotal =
           dispatch.amount.supplyValue + dispatch.amount.tax;
+        // Tip is excluded from `treatmentTotal` because medicash can't cover
+        // it (backend validation: pointUseAmount + charged{Supply,Tax} == supply
+        // + tax). Customer-facing total displays must still include it though,
+        // so it lives as a separate variable.
+        const tip = dispatch.amount.tip ?? 0;
         const minUse = dispatch.pointContext?.minUseAmount ?? 0;
 
         async function handlePointChoice(pointUse) {
@@ -184,40 +189,73 @@
           const tax = Math.floor(charged / 11);
           const supplyValue = charged - tax;
 
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(
-              JSON.stringify({
-                type: "session.chargeContext",
-                payload: {
-                  sessionId,
-                  pointUseAmount: pointUse,
-                  chargedSupplyValue: supplyValue,
-                  chargedTax: tax,
-                },
-              }),
-            );
+          // Build the orderSnapshot for the confirmation render. Backend
+          // populates summary.earned (label "이번 결제 적립", suffix "캐시")
+          // per spec §2 for the expected accrual display. We append the
+          // medicash use as a discount line, bump summary.discountAmount,
+          // and override summary.totalAmount to the net out-of-pocket
+          // amount (charged + tip) for the bottom CTA.
+          const base = dispatch.orderSnapshot || {};
+          const baseSummary = base.summary || {};
+          const orderForDisplay = {
+            items: base.items || [],
+            discounts: (base.discounts || []).slice(),
+            summary: { ...baseSummary },
+          };
+          if (pointUse > 0) {
+            orderForDisplay.discounts.push({
+              label: "메디캐시 사용",
+              value: pointUse,
+            });
+            orderForDisplay.summary.discountAmount =
+              (orderForDisplay.summary.discountAmount || 0) + pointUse;
           }
+          orderForDisplay.summary.totalAmount = charged + tip;
 
-          sessionStorage.setItem(
-            "smartdoctor.dispatch.pointUse",
-            String(pointUse),
-          );
+          sdk.template.renderOrderPage({
+            order: orderForDisplay,
+            localeCode: "ko",
+            onClick: async () => {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(
+                  JSON.stringify({
+                    type: "session.chargeContext",
+                    payload: {
+                      sessionId,
+                      pointUseAmount: pointUse,
+                      chargedSupplyValue: supplyValue,
+                      chargedTax: tax,
+                    },
+                  }),
+                );
+              }
 
-          if (charged === 0) {
-            // 100% 메디캐시 path: navigate to payment.html for the success-only
-            // branch. Per frontend MD §6.2.
-            closeWs(ws);
-            location.href = "./payment.html#" + sessionId;
-            return;
-          }
+              sessionStorage.setItem(
+                "smartdoctor.dispatch.pointUse",
+                String(pointUse),
+              );
 
-          // Card path (charged > 0): plugin's role ends after sending
-          // session.chargeContext. Per frontend MD §6.1 the plugin stays on
-          // whatever screen — Toss firmware will auto-overlay 통합결제창 and
-          // auto-setIdle on completion. Show an informational toast so the user
-          // knows to look at the terminal.
-          await sdk.template.openToast({
-            message: "결제 단말기에서 카드를 확인해주세요.",
+              if (charged === 0) {
+                // 100% 메디캐시 path: navigate to payment.html for the
+                // success-only branch (frontend MD §6.2).
+                closeWs(ws);
+                location.href = "./payment.html#" + sessionId;
+                return;
+              }
+
+              // Card path (charged > 0): plugin's role ends after sending
+              // session.chargeContext. Per frontend MD §6.1 the plugin stays
+              // on the renderOrderPage screen — Toss firmware will auto-overlay
+              // 통합결제창 and auto-setIdle on completion. The toast informs
+              // the user to look at the terminal.
+              await sdk.template.openToast({
+                message: "결제 단말기에서 카드를 확인해주세요.",
+              });
+            },
+            // renderOrderPage's onBack is [GAP] per the SDK docs (not in the
+            // documented Params block). Wire it best-effort; the CRM-side
+            // abort path is authoritative if it never fires.
+            onBack: sendAbortAndGoHome,
           });
         }
 
@@ -249,7 +287,7 @@
                 </div>
                 <div class="medicash-summary-row">
                   <span class="medicash-summary-label">총 결제 금액</span>
-                  <span class="medicash-summary-total">${(treatmentTotal - usableCash).toLocaleString()}원</span>
+                  <span class="medicash-summary-total">${(treatmentTotal + tip - usableCash).toLocaleString()}원</span>
                 </div>
               </div>
               <div class="medicash-actions">
