@@ -184,78 +184,78 @@
         const tip = dispatch.amount.tip ?? 0;
         const minUse = dispatch.pointContext?.minUseAmount ?? 0;
 
-        async function handlePointChoice(pointUse) {
+        function handlePointChoice(pointUse) {
           const charged = treatmentTotal - pointUse;
           const tax = Math.floor(charged / 11);
           const supplyValue = charged - tax;
 
-          // Build the orderSnapshot for the confirmation render. Backend
-          // populates summary.earned (label "이번 결제 적립", suffix "캐시")
-          // per spec §2 for the expected accrual display. We append the
-          // medicash use as a discount line, bump summary.discountAmount,
-          // and override summary.totalAmount to the net out-of-pocket
-          // amount (charged + tip) for the bottom CTA.
-          const base = dispatch.orderSnapshot || {};
-          const baseSummary = base.summary || {};
-          const orderForDisplay = {
-            items: base.items || [],
-            discounts: (base.discounts || []).slice(),
-            summary: { ...baseSummary },
-          };
-          if (pointUse > 0) {
-            orderForDisplay.discounts.push({
-              label: "메디캐시 사용",
-              value: pointUse,
-            });
-            orderForDisplay.summary.discountAmount =
-              (orderForDisplay.summary.discountAmount || 0) + pointUse;
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(
+              JSON.stringify({
+                type: "session.chargeContext",
+                payload: {
+                  sessionId,
+                  pointUseAmount: pointUse,
+                  chargedSupplyValue: supplyValue,
+                  chargedTax: tax,
+                },
+              }),
+            );
           }
-          orderForDisplay.summary.totalAmount = charged + tip;
 
-          sdk.template.renderOrderPage({
-            order: orderForDisplay,
-            localeCode: "ko",
-            onClick: async () => {
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(
-                  JSON.stringify({
-                    type: "session.chargeContext",
-                    payload: {
-                      sessionId,
-                      pointUseAmount: pointUse,
-                      chargedSupplyValue: supplyValue,
-                      chargedTax: tax,
-                    },
-                  }),
-                );
+          sessionStorage.setItem(
+            "smartdoctor.dispatch.pointUse",
+            String(pointUse),
+          );
+
+          // 100%-메디캐시: skip NICE entirely; payment.html sends session.result
+          // with tossResponse: null directly (existing skip path).
+          if (charged === 0) {
+            closeWs(ws);
+            location.href = "./payment.html#" + sessionId;
+            return;
+          }
+
+          // Reader mode: plugin acts as a passive serial bridge between NICE
+          // 카드단말기 and Toss's internal VAN module. Per Toss Slack guidance
+          // (channel C0ANAJW463E msg 1778737088, 2026-05-14):
+          // - Toss FRONT auto-overlays 통합결제창 when NICE triggers
+          // - Plugin does NOT call sdk.payment.requestPayment
+          // - Plugin does NOT send session.result (CRM forwards from NICE)
+          enterReaderMode();
+        }
+
+        function enterReaderMode() {
+          // Show Toss's idle page — Toss SDK auto-overlays the 통합결제창 on top
+          // when NICE 카드단말기 triggers via serial. Plugin doesn't need a
+          // custom waiting screen (per Toss Slack guidance 2026-05-14).
+          sdk.template.renderIdlePage({ type: "default" });
+
+          // Open serial port for NICE communication. Plugin is a passive bridge:
+          // serial input from NICE → sdk.van.write to Toss's internal VAN module.
+          // baudRate 115200 per Toss spec.
+          let unlisten = null;
+          try {
+            sdk.serial.open({ baudRate: 115200, intercept: true });
+            unlisten = sdk.serial.listen((params) => {
+              try {
+                sdk.van.write(params);
+              } catch (e) {
+                console.warn("[smartdoctor] order.html sdk.van.write failed", e);
               }
+            });
+          } catch (e) {
+            console.warn("[smartdoctor] order.html sdk.serial.open failed", e);
+          }
 
-              sessionStorage.setItem(
-                "smartdoctor.dispatch.pointUse",
-                String(pointUse),
-              );
-
-              if (charged === 0) {
-                // 100% 메디캐시 path: navigate to payment.html for the
-                // success-only branch (frontend MD §6.2).
-                closeWs(ws);
-                location.href = "./payment.html#" + sessionId;
-                return;
-              }
-
-              // Card path (charged > 0): plugin's role ends after sending
-              // session.chargeContext. Per frontend MD §6.1 the plugin stays
-              // on the renderOrderPage screen — Toss firmware will auto-overlay
-              // 통합결제창 and auto-setIdle on completion. The toast informs
-              // the user to look at the terminal.
-              await sdk.template.openToast({
-                message: "결제 단말기에서 카드를 확인해주세요.",
-              });
-            },
-            // renderOrderPage's onBack is [GAP] per the SDK docs (not in the
-            // documented Params block). Wire it best-effort; the CRM-side
-            // abort path is authoritative if it never fires.
-            onBack: sendAbortAndGoHome,
+          // Clean up serial port on unload (next page load, navigation, etc.)
+          window.addEventListener("beforeunload", () => {
+            try {
+              sdk.serial.close();
+              unlisten?.();
+            } catch (e) {
+              console.warn("[smartdoctor] order.html sdk.serial.close failed", e);
+            }
           });
         }
 
