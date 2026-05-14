@@ -2,7 +2,7 @@
 
 > **Date:** 2026-05-11
 > **Scope:** Frontend plugin only (`front-plugin-js/`).
-> **Depends on:** [payment-flow-with-nice-terminal-frontend.md](../../payment-flow-with-nice-terminal-frontend.md) §7 "Pre-test block".
+> **Canonical NICE-paired contract:** [2026-05-12-nice-paired-final-flow-design.md](./2026-05-12-nice-paired-final-flow-design.md) (supersedes `toss-payment-flow.md` §5.5–§6 for the NICE flow).
 
 ---
 
@@ -118,7 +118,7 @@ sdk.serial.listen((params) => sdk.van.write(params));
 
 ### 3.4 payment.html changes
 
-Remove the `session.chargeContext` send (current lines 126–134). The rest of `runPayment` is unchanged — it still computes charged/tax/supplyValue from `pointUse` for `requestPayment` and `pendingPayment`.
+`session.chargeContext` send is removed from `runPayment` (now in order.html). Under the NICE-paired reader-mode flow, `payment.html` is only entered for the **100% 메디캐시 skip path** (see §3.5) — `requestPayment` / `pendingPayment` are not reached. The legacy `runPayment` code below the skip-path branch is retained for now but is dead code under the NICE-paired contract; removal is a follow-up cleanup.
 
 ### 3.5 100%-메디캐시 skip path
 
@@ -131,7 +131,7 @@ Unchanged at the SDK level. When `charged === 0`:
 
 Backend's `session.proceed` flows from Core to **CRM** (not plugin), with `nextAction: DISPATCH_NICE | SKIP_NICE`. Plugin does not consume this message — it's a CRM-side signal to dispatch (or skip) NICE.
 
-Documented canonically in [toss-payment-flow.md §5.5](toss-payment-flow.md).
+Documented canonically in [2026-05-12-nice-paired-final-flow-design.md](./2026-05-12-nice-paired-final-flow-design.md). The corresponding section in `toss-payment-flow.md` (§5.5 "Plugin Awaits Proceed") is marked obsolete by that doc's superseded banner.
 
 ---
 
@@ -140,9 +140,8 @@ Documented canonically in [toss-payment-flow.md §5.5](toss-payment-flow.md).
 | File | Change |
 |---|---|
 | `front-plugin-js/order.html` | Custom 메디캐시 page + `handlePointChoice` + chargeContext send + reader mode entry (sdk.template.renderIdlePage + sdk.serial bridge) |
-| `front-plugin-js/payment.html` | Remove chargeContext send (now in order.html); still handles 100%-메디캐시 skip and refund |
+| `front-plugin-js/payment.html` | Remove chargeContext send (now in order.html); under reader mode, only the 100%-메디캐시 skip path is reached |
 | `front-plugin-js/global.css` | Styles for custom 메디캐시 page |
-| `docs/superpowers/specs/toss-payment-flow.md` | §5.5 Plugin Enters Reader Mode; updated §6 (plugin doesn't send session.result for NICE payments) |
 
 ---
 
