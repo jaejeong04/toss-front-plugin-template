@@ -41,40 +41,36 @@ window.smartdoctor.pluginWsUrl = function (serialNumber) {
 //   payment.html does NOT call this — it's only entered for 100%-메디캐시
 //   (NICE bypassed entirely).
 window.smartdoctor.initSerialPort = function () {
-  // Split sdk.serial.open vs. sdk.serial.listen failure modes so an
-  // open-succeeded-but-listen-threw case can't leak an orphan port.
+  // Matches Toss's Slack guideline snippet (channel C0ANAJW463E msg
+  // 1778737088, 2026-05-14) verbatim — including the bidirectional log
+  // calls (`>>` before sdk.van.write, `<<` after) so on-device debugging
+  // can see every serial frame routed to the VAN module.
+  function log(message) {
+    console.log(`[smartdoctor] ${message}`);
+  }
 
   try {
     sdk.serial.open({ baudRate: 115200, intercept: true });
-  } catch (e) {
-    // Port never opened. Nothing to clean up; skip registering beforeunload.
-    console.warn("[smartdoctor] sdk.serial.open failed", e);
-    return;
+    log("[Serial] Port opened (baudRate: 115200, intercept: true)");
+  } catch (error) {
+    log(`[Error] Serial Open: ${error}`);
   }
 
   let unlisten = null;
   try {
-    unlisten = sdk.serial.listen((params) => {
-      try {
-        sdk.van.write(params);
-      } catch (e) {
-        console.warn("[smartdoctor] sdk.van.write failed", e);
-      }
-    });
-  } catch (e) {
-    // Port is open but no listener. Still need to close on unload.
-    console.warn("[smartdoctor] sdk.serial.listen failed", e);
+    const cb = (params) => {
+      log(`[Serial] >> ${JSON.stringify(params)}`);
+      sdk.van.write(params);
+      log(`[Serial] << ${JSON.stringify(params)}`);
+    };
+    unlisten = sdk.serial.listen(cb);
+    log("[Serial] Listener registered");
+  } catch (error) {
+    log(`[Error] Serial Listen: ${error}`);
   }
 
-  // Cleanup on unload. Port is definitely open at this point (the
-  // open-failure branch above returned early). If listen threw,
-  // unlisten stays null and we just close the port.
   window.addEventListener("beforeunload", () => {
-    try {
-      sdk.serial.close();
-      if (unlisten !== null) unlisten();
-    } catch (e) {
-      console.warn("[smartdoctor] sdk.serial.close failed", e);
-    }
+    sdk.serial.close();
+    unlisten?.();
   });
 };
