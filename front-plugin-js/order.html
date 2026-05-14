@@ -231,12 +231,18 @@
         }
 
         function enterReaderMode() {
-          // Switch UI to Toss's idle page — Toss SDK auto-overlays the
-          // 통합결제창 on top when NICE 카드단말기 triggers via serial.
-          // The serial port was already opened at main() start via
-          // window.smartdoctor.initSerialPort(), so all we do here is
-          // change the UI from the medicash page to idle.
-          sdk.template.renderIdlePage({ type: "default" });
+          // Reader mode is fully transparent to the plugin's UI: serial was
+          // already opened at main() start via window.smartdoctor.initSerialPort(),
+          // and Toss firmware overlays its 통합결제창 on top of whatever the
+          // plugin is rendering when NICE triggers via serial.
+          //
+          // We previously called sdk.template.renderIdlePage here, but real-
+          // device testing on the NICE NC-8000P (2026-05-14) showed NICE
+          // displaying "단말기나 POS가 취소 시 처리 불가 카드(CD)" mid-credit-
+          // approval — likely because firmware interpreted the mid-session
+          // renderIdlePage as a session-end / cancel signal to NICE.
+          //
+          // Leaving the medicash UI on screen until firmware overlays.
         }
 
         function renderMedicashPage() {
