@@ -35,6 +35,11 @@
         //    name (sdk.app.getMerchant().name) below the default illustration.
         sdk.template.renderIdlePage({ type: "default" });
 
+        // 1a. Open serial port for NICE 카드단말기 communication. Must be active
+        //     from idle/boot so NICE doesn't show "NFC멀티패드 작동오류" while the
+        //     plugin is idle. Per Toss Slack guidance 2026-05-14.
+        window.smartdoctor.initSerialPort();
+
         // 2. Device serial — destructure (spec §2.5: returns { serialNumber }).
         //    The serial is the device identity; backend trusts it because Toss
         //    registers test devices on the partner-portal side.

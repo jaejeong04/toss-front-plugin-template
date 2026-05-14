@@ -29,3 +29,42 @@ window.smartdoctor.pluginWsUrl = function (serialNumber) {
     encodeURIComponent(window.smartdoctor.config.CORE_TOKEN);
   return window.smartdoctor.backendWsUrl(path);
 };
+
+// Serial port setup for NICE 카드단말기 reader-mode bridge.
+// Per Toss Slack guidance (channel C0ANAJW463E msg 1778737088, 2026-05-14):
+// - Plugin opens serial at baudRate 115200 with intercept: true
+// - Listener forwards every serial frame to sdk.van.write (Toss internal VAN module)
+// - Toss FRONT firmware auto-overlays its 통합결제창 when NICE triggers
+// - Page-scoped: each page that calls this also gets a beforeunload close.
+//   Called from home.html main() and order.html main() so the serial port
+//   is alive from boot through the medicash UI into reader mode.
+//   payment.html does NOT call this — it's only entered for 100%-메디캐시
+//   (NICE bypassed entirely).
+window.smartdoctor.initSerialPort = function () {
+  let unlisten = null;
+  try {
+    sdk.serial.open({ baudRate: 115200, intercept: true });
+    unlisten = sdk.serial.listen((params) => {
+      try {
+        sdk.van.write(params);
+      } catch (e) {
+        console.warn("[smartdoctor] sdk.van.write failed", e);
+      }
+    });
+  } catch (e) {
+    console.warn("[smartdoctor] sdk.serial.open failed", e);
+  }
+
+  // Cleanup on unload. Guard with `unlisten !== null` — if sdk.serial.open()
+  // threw above, the port was never opened and close() would be a no-op or
+  // worse. Same defensive pattern as the prior order.html implementation.
+  window.addEventListener("beforeunload", () => {
+    if (unlisten === null) return;
+    try {
+      sdk.serial.close();
+      unlisten();
+    } catch (e) {
+      console.warn("[smartdoctor] sdk.serial.close failed", e);
+    }
+  });
+};

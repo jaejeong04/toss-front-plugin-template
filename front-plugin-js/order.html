@@ -46,6 +46,11 @@
 
         const { serialNumber } = await sdk.app.getSerialNumber();
 
+        // Open serial port for NICE 카드단말기 communication. Open immediately
+        // so it's active during the medicash UI phase and into reader mode —
+        // not just after chargeContext. Per Toss Slack guidance 2026-05-14.
+        window.smartdoctor.initSerialPort();
+
         const ws = new WebSocket(window.smartdoctor.pluginWsUrl(serialNumber));
         let heartbeatTimer = null;
 
@@ -226,40 +231,12 @@
         }
 
         function enterReaderMode() {
-          // Show Toss's idle page — Toss SDK auto-overlays the 통합결제창 on top
-          // when NICE 카드단말기 triggers via serial. Plugin doesn't need a
-          // custom waiting screen (per Toss Slack guidance 2026-05-14).
+          // Switch UI to Toss's idle page — Toss SDK auto-overlays the
+          // 통합결제창 on top when NICE 카드단말기 triggers via serial.
+          // The serial port was already opened at main() start via
+          // window.smartdoctor.initSerialPort(), so all we do here is
+          // change the UI from the medicash page to idle.
           sdk.template.renderIdlePage({ type: "default" });
-
-          // Open serial port for NICE communication. Plugin is a passive bridge:
-          // serial input from NICE → sdk.van.write to Toss's internal VAN module.
-          // baudRate 115200 per Toss spec.
-          let unlisten = null;
-          try {
-            sdk.serial.open({ baudRate: 115200, intercept: true });
-            unlisten = sdk.serial.listen((params) => {
-              try {
-                sdk.van.write(params);
-              } catch (e) {
-                console.warn("[smartdoctor] order.html sdk.van.write failed", e);
-              }
-            });
-          } catch (e) {
-            console.warn("[smartdoctor] order.html sdk.serial.open failed", e);
-          }
-
-          // Clean up serial port on unload (next page load, navigation, etc.).
-          // Guard with `unlisten !== null` — if sdk.serial.open() threw above,
-          // the port was never opened and close() would be a no-op-or-error.
-          window.addEventListener("beforeunload", () => {
-            if (unlisten === null) return;
-            try {
-              sdk.serial.close();
-              unlisten();
-            } catch (e) {
-              console.warn("[smartdoctor] order.html sdk.serial.close failed", e);
-            }
-          });
         }
 
         function renderMedicashPage() {
