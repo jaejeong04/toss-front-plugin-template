@@ -8,6 +8,8 @@
 >
 > **Audience:** plugin engineer working in [`front-plugin-js/`](../front-plugin-js/). For backend and CRM responsibilities see the sibling MDs.
 
+> **⚠️ Superseded (2026-05-14):** Toss clarified that NICE + Toss FRONT operates in **시리얼통신 기반 리더기 모드** (serial-based reader mode), not the trigger-via-`sdk.webSocket` model assumed in this doc. The plugin is now a passive serial bridge using `sdk.serial.open` + `sdk.van.write`. See [docs/superpowers/specs/toss-payment-flow.md §5.5](./superpowers/specs/toss-payment-flow.md) and [docs/superpowers/specs/2026-05-11-medicash-page-flow-restructure.md](./superpowers/specs/2026-05-11-medicash-page-flow-restructure.md) for the current architecture. This doc remains for historical reference.
+
 ---
 
 ## 1. Plugin's role in the NICE-paired flow

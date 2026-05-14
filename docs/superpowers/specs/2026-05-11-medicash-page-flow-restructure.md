@@ -97,26 +97,21 @@ mount
 
 Skipped in the new flow. The custom 메디캐시 page already displays amounts. Can be re-added later as a UX decision.
 
-### 3.3 Waiting screen
+### 3.3 Reader mode entry
 
-Rendered into `#app` via `innerHTML`. Shows:
-- Back arrow (← → session.abort + home.html)
-- Message: "카드 단말기에서 결제를 진행해주세요"
-- Loading spinner/indicator
+After `session.chargeContext` is sent (and charged > 0), plugin enters **reader mode** instead of rendering a custom waiting screen. Per Toss guidance (Slack channel C0ANAJW463E msg 1778737088, 2026-05-14), the architecture is 시리얼통신 기반 리더기 모드:
 
-Stays foreground until `session.proceed` arrives over WS B.
+```js
+sdk.template.renderIdlePage({ type: "default" });
+sdk.serial.open({ baudRate: 115200, intercept: true });
+sdk.serial.listen((params) => sdk.van.write(params));
+```
 
-**Defensive timeout**: If `session.proceed` does not arrive within 120 seconds, plugin shows an error toast ("결제 단말기 응답이 늦어지고 있어요") and sends `session.abort(USER_BACKED_OUT)` before navigating home. Backend's `IN_PROGRESS` timer (`timeoutMs + 30s`) would also fire, but the plugin needs its own escape hatch in case the WS itself dropped silently.
-
-### 3.3.1 Feature gate (`AWAITS_PROCEED`)
-
-The waiting screen is gated by `window.smartdoctor.config.AWAITS_PROCEED` in `config.js`. When `false` (default), plugin navigates directly to payment.html after `session.chargeContext` — the pre-restructure flow. When `true`, plugin renders the waiting screen and waits for `session.proceed`.
-
-Rollout sequence:
-1. Deploy plugin with `AWAITS_PROCEED: false` — safe (matches old backend behavior)
-2. Backend ships `session.proceed`
-3. CRM ships NICE 카드 단말기 dispatch
-4. Flip `AWAITS_PROCEED: true` in `config.js`, redeploy plugin
+- Plugin shows Toss's idle page — Toss SDK auto-overlays 통합결제창 when NICE triggers via serial
+- Plugin is a passive bridge: forwards card-reading data from NICE to Toss's internal VAN module via `sdk.van.write`
+- No custom waiting UI, no back button, no timeout — Toss SDK + NICE handle the UX
+- Plugin does NOT call `sdk.payment.requestPayment` for NICE-mediated payments
+- Plugin does NOT send `session.result` — CRM forwards NICE's result to backend
 
 ### 3.4 payment.html changes
 
@@ -129,20 +124,11 @@ Unchanged at the SDK level. When `charged === 0`:
 - order.html navigates directly to payment.html (no waiting screen)
 - payment.html handles the skip path as today (sends `session.result` with `tossResponse: null`)
 
-### 3.6 `session.proceed` contract (new WS B message)
+### 3.6 `session.proceed` flow (Core → CRM, not plugin)
 
-Backend sends this to plugin over WS B after CRM has dispatched to NICE and NICE is ready for the Toss FRONT payment. Documented canonically in [toss-payment-flow.md §5.5](toss-payment-flow.md). Minimal shape:
+Backend's `session.proceed` flows from Core to **CRM** (not plugin), with `nextAction: DISPATCH_NICE | SKIP_NICE`. Plugin does not consume this message — it's a CRM-side signal to dispatch (or skip) NICE.
 
-```json
-{
-  "type": "session.proceed",
-  "payload": {
-    "sessionId": "<sessionId>"
-  }
-}
-```
-
-Plugin validates `sessionId` matches the current session before navigating.
+Documented canonically in [toss-payment-flow.md §5.5](toss-payment-flow.md).
 
 ---
 
@@ -150,17 +136,16 @@ Plugin validates `sessionId` matches the current session before navigating.
 
 | File | Change |
 |---|---|
-| `front-plugin-js/order.html` | Major: custom 메디캐시 page + `handlePointChoice` + chargeContext send + waiting screen + AWAITS_PROCEED gate + 120s timeout |
-| `front-plugin-js/payment.html` | Minor: remove chargeContext send |
-| `front-plugin-js/global.css` | Add styles for custom 메디캐시 page and waiting screen |
-| `front-plugin-js/config.js` | Add `AWAITS_PROCEED` feature flag |
-| `docs/superpowers/specs/toss-payment-flow.md` | Add §5.5 `session.proceed` contract; update §5 timing |
+| `front-plugin-js/order.html` | Custom 메디캐시 page + `handlePointChoice` + chargeContext send + reader mode entry (sdk.template.renderIdlePage + sdk.serial bridge) |
+| `front-plugin-js/payment.html` | Remove chargeContext send (now in order.html); still handles 100%-메디캐시 skip and refund |
+| `front-plugin-js/global.css` | Styles for custom 메디캐시 page |
+| `docs/superpowers/specs/toss-payment-flow.md` | §5.5 Plugin Enters Reader Mode; updated §6 (plugin doesn't send session.result for NICE payments) |
 
 ---
 
 ## 5. Out of scope
 
-- `sdk.webSocket` server wiring (post-test block, per feasibility §7)
-- NICE trigger handler (post-test block)
-- Backend `session.proceed` implementation (backend team)
-- CRM → NICE dispatch (CRM team)
+- Backend `session.proceed` (Core → CRM) — backend team, shipped 2026-05-13
+- CRM → NICE dispatch + NICE → CRM result relay (CRM team + NICE vendor)
+- Refund flow for NICE-issued payments — `sdk.payment.requestPaymentCancel` semantics for NICE-owned card transactions need clarification from Toss
+- `sdk.serial` and `sdk.van` API details — used as suggested by Toss Slack guidance without further documentation
