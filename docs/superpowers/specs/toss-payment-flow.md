@@ -333,7 +333,7 @@ Hospital DB 저장:
 Plugin은 chargeContext 송신 직후 다음 분기로 진입한다.
 
 - **100% 메디캐시 (`chargedSupplyValue === 0 && chargedTax === 0`)**: NICE 단말기를 거치지 않는다. Plugin이 `session.proceed`를 기다리지 않고 곧바로 §6의 `session.result`로 진행한다 (`tossResponse: null`). Core는 zero-charge chargeContext를 보고 CRM에 NICE dispatch를 보내지 말라고 신호한다.
-- **부분 메디캐시 또는 메디캐시 미사용 (`chargedSupplyValue + chargedTax > 0`)**: Plugin은 §5.5의 `session.proceed`를 기다린다. Core는 CRM에 할인 후 금액을 전달하고, CRM은 NICE 단말기에 결제 dispatch를 보낸다. NICE가 준비되면 core가 `session.proceed`로 plugin을 깨운다.
+- **부분 메디캐시 또는 메디캐시 미사용 (`chargedSupplyValue + chargedTax > 0`)**: Plugin은 §5.5의 **reader mode**로 진입한다 (`sdk.template.renderIdlePage` + `sdk.serial.open` + `sdk.van.write`). Core는 `session.proceed`를 **CRM**으로 전달하고 (`nextAction: DISPATCH_NICE`), CRM은 NICE 단말기에 결제 dispatch를 보낸다. Plugin은 `session.proceed`를 수신하지 않는다.
 
 ## 5.5. Plugin Enters Reader Mode (NICE 시리얼 연동)
 

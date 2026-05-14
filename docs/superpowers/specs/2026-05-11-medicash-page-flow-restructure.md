@@ -12,7 +12,7 @@ Two changes to the Toss FRONT plugin:
 
 1. **Custom 메디캐시 page** — replace `sdk.template.renderUsePointPage` with custom HTML. Toss confirmed the points page can use custom rendering. The template doesn't support renaming "포인트" → "메디캐시", so custom HTML is required.
 
-2. **Flow restructuring** — move `session.chargeContext` from payment.html to order.html (end of phase 1). After chargeContext, show a waiting screen until backend sends `session.proceed` over WS B (Alternative A from the feasibility review). Payment.html only runs phase 2 (`requestPayment`).
+2. **Flow restructuring** — move `session.chargeContext` from payment.html to order.html (end of phase 1). After chargeContext (charged > 0), plugin enters **reader mode** (`sdk.template.renderIdlePage` + serial bridge) — no waiting screen, no navigation. Backend sends `session.proceed` to **CRM** (not plugin). Payment.html handles only the 100% 메디캐시 skip path.
 
 ---
 
@@ -85,12 +85,15 @@ mount
     ├─ if charged === 0 (100%-메디캐시)
     │     close WS → navigate to payment.html (existing skip path)
     ├─ else
-    │     render waiting screen
-    │     listen WS B for:
-    │       session.proceed → close WS → navigate to payment.html
-    │       session.abort   → toast → home.html
-    │       error           → error toast → home.html
-    │     back arrow → session.abort(USER_BACKED_OUT) → home.html
+    │     enter reader mode (§3.3):
+    │       sdk.template.renderIdlePage({ type: "default" })
+    │       sdk.serial.open({ baudRate: 115200, intercept: true })
+    │       sdk.serial.listen((params) => sdk.van.write(params))
+    │     [Toss SDK auto-overlays 통합결제창 when NICE triggers]
+    │     [session.proceed flows Core → CRM (not plugin)]
+    │     WS B onmessage:
+    │       session.abort (ABORTED_BY_CRM) → toast → home.html
+    │       error → error toast → home.html
 ```
 
 ### 3.2 renderOrderPage (confirmation screen)
