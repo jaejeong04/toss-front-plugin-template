@@ -248,11 +248,14 @@
             console.warn("[smartdoctor] order.html sdk.serial.open failed", e);
           }
 
-          // Clean up serial port on unload (next page load, navigation, etc.)
+          // Clean up serial port on unload (next page load, navigation, etc.).
+          // Guard with `unlisten !== null` — if sdk.serial.open() threw above,
+          // the port was never opened and close() would be a no-op-or-error.
           window.addEventListener("beforeunload", () => {
+            if (unlisten === null) return;
             try {
               sdk.serial.close();
-              unlisten?.();
+              unlisten();
             } catch (e) {
               console.warn("[smartdoctor] order.html sdk.serial.close failed", e);
             }
