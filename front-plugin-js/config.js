@@ -41,9 +41,19 @@ window.smartdoctor.pluginWsUrl = function (serialNumber) {
 //   payment.html does NOT call this — it's only entered for 100%-메디캐시
 //   (NICE bypassed entirely).
 window.smartdoctor.initSerialPort = function () {
-  let unlisten = null;
+  // Split sdk.serial.open vs. sdk.serial.listen failure modes so an
+  // open-succeeded-but-listen-threw case can't leak an orphan port.
+
   try {
     sdk.serial.open({ baudRate: 115200, intercept: true });
+  } catch (e) {
+    // Port never opened. Nothing to clean up; skip registering beforeunload.
+    console.warn("[smartdoctor] sdk.serial.open failed", e);
+    return;
+  }
+
+  let unlisten = null;
+  try {
     unlisten = sdk.serial.listen((params) => {
       try {
         sdk.van.write(params);
@@ -52,17 +62,17 @@ window.smartdoctor.initSerialPort = function () {
       }
     });
   } catch (e) {
-    console.warn("[smartdoctor] sdk.serial.open failed", e);
+    // Port is open but no listener. Still need to close on unload.
+    console.warn("[smartdoctor] sdk.serial.listen failed", e);
   }
 
-  // Cleanup on unload. Guard with `unlisten !== null` — if sdk.serial.open()
-  // threw above, the port was never opened and close() would be a no-op or
-  // worse. Same defensive pattern as the prior order.html implementation.
+  // Cleanup on unload. Port is definitely open at this point (the
+  // open-failure branch above returned early). If listen threw,
+  // unlisten stays null and we just close the port.
   window.addEventListener("beforeunload", () => {
-    if (unlisten === null) return;
     try {
       sdk.serial.close();
-      unlisten();
+      if (unlisten !== null) unlisten();
     } catch (e) {
       console.warn("[smartdoctor] sdk.serial.close failed", e);
     }
