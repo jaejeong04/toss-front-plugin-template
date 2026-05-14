@@ -1,10 +1,9 @@
-body {
+html, body {
   margin: 0;
+  width: 100%;
+  height: 100%;
   line-height: normal;
   font-family: "Toss Product Sans", sans-serif;
-  width: 400px;
-  height: 640px;
-  box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
 }
 
 * {
@@ -13,8 +12,8 @@ body {
 }
 
 #app {
-  width: 400px;
-  height: 640px;
+  width: 100%;
+  height: 100%;
 }
 
 /* ── Custom 메디캐시 page ─────────────────────────────── */
