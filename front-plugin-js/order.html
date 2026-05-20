@@ -87,6 +87,27 @@
               ws.send(JSON.stringify({ type: "ping", payload: {} }));
             }
           }, HEARTBEAT_MS);
+
+          // Medicash-UI-vs-skip decision lives here (inside ws.onopen),
+          // not at the end of main(). Reason: `new WebSocket(...)` is
+          // CONNECTING (not OPEN) when synchronous main() finishes, so a
+          // top-level handlePointChoice(0) — the no-medicash skip path —
+          // would hit the `ws.readyState === OPEN` guard inside it and
+          // silently drop `session.chargeContext`. CRM forwards that
+          // message to NICE 카드단말기 to trigger card approval; without
+          // it, the session sits IN_PROGRESS for 3 minutes until backend
+          // expiry. Running this inside onopen guarantees readyState is
+          // OPEN, so the send goes through. The medicash-UI branch is
+          // race-free either way because the user click happens long
+          // after onopen, but co-locating both branches keeps the entry
+          // point in one place. All identifiers below (usableCash, minUse,
+          // handlePointChoice, renderMedicashPage) are declared later in
+          // main() but resolve at call time — onopen is async.
+          if (usableCash >= minUse && usableCash > 0) {
+            renderMedicashPage();
+          } else {
+            handlePointChoice(0);
+          }
         };
 
         ws.onclose = () => {
@@ -295,12 +316,6 @@
             "click",
             () => handlePointChoice(usableCash),
           );
-        }
-
-        if (usableCash >= minUse && usableCash > 0) {
-          renderMedicashPage();
-        } else {
-          handlePointChoice(0);
         }
       }
 
