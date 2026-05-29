@@ -267,55 +267,18 @@
         }
 
         function renderMedicashPage() {
-          document.getElementById("app").innerHTML = `
-            <div class="medicash-page">
-              <div class="medicash-header">
-                <button class="medicash-back" id="medicashBack">
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-                    <path d="M15 18l-6-6 6-6" stroke="#191F28" stroke-width="2"
-                          stroke-linecap="round" stroke-linejoin="round"/>
-                  </svg>
-                </button>
-              </div>
-              <div class="medicash-body">
-                <h1 class="medicash-title">메디캐시를 쓸까요?</h1>
-                <div class="medicash-balance">
-                  <div class="medicash-icon">P</div>
-                  <div class="medicash-balance-info">
-                    <span class="medicash-balance-label">사용 가능한 메디캐시</span>
-                    <span class="medicash-balance-amount">${usableCash.toLocaleString()}캐시</span>
-                  </div>
-                </div>
-              </div>
-              <div class="medicash-summary">
-                <div class="medicash-summary-row">
-                  <span class="medicash-summary-label">메디캐시 사용</span>
-                  <span class="medicash-summary-value">${usableCash.toLocaleString()}캐시</span>
-                </div>
-                <div class="medicash-summary-row">
-                  <span class="medicash-summary-label">총 결제 금액</span>
-                  <span class="medicash-summary-total">${(treatmentTotal + tip - usableCash).toLocaleString()}원</span>
-                </div>
-              </div>
-              <div class="medicash-actions">
-                <button class="medicash-btn medicash-btn-cancel" id="medicashSkip">사용 안 함</button>
-                <button class="medicash-btn medicash-btn-submit" id="medicashUse">전액 사용</button>
-              </div>
-            </div>
-          `;
-
-          document.getElementById("medicashBack").addEventListener(
-            "click",
-            sendAbortAndGoHome,
-          );
-          document.getElementById("medicashSkip").addEventListener(
-            "click",
-            () => handlePointChoice(0),
-          );
-          document.getElementById("medicashUse").addEventListener(
-            "click",
-            () => handlePointChoice(usableCash),
-          );
+          sdk.template.renderUsePointPage({
+            points: [{ name: "사용 가능한 메디캐시", amount: usableCash }],
+            summary: {
+              pointUsedAmount: usableCash,
+              paymentAmount: treatmentTotal + tip - usableCash,
+            },
+            cta: {
+              submit: { onClick: () => handlePointChoice(usableCash) }, // 전액 사용
+              cancel: { onClick: () => handlePointChoice(0) }, // 사용 안 함
+            },
+            onBack: sendAbortAndGoHome,
+          });
         }
       }
 
