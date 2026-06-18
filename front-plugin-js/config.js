@@ -2,7 +2,7 @@ window.smartdoctor = window.smartdoctor || {};
 
 window.smartdoctor.config = {
   // Backend host — must match the Toss project's ACL (URL).
-  BACKEND_HOST: "develop.api.core.smartdoctor.systems",
+  BACKEND_HOST: "main.api.core.smartdoctor.systems",
 
   // Dev-only token. Backend confirmed `crm_qalmighty` is accepted on dev for
   // both CRM and plugin sockets (loose dev auth). Production token sourcing is
