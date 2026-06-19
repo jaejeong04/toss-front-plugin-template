@@ -25,92 +25,6 @@
   </head>
   <body>
     <div id="app"></div>
-    <style>
-      /* ── 수납 완료 success screen ─────────────────────────── */
-      .success-page {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: space-between;
-        height: 100%;
-        background: #fff;
-        padding: 0 24px 32px;
-      }
-
-      .success-body {
-        flex: 1;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 20px;
-        text-align: center;
-      }
-
-      .success-icon-wrap {
-        width: 72px;
-        height: 72px;
-        border-radius: 50%;
-        background: #EBF3FE;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-
-      .success-title {
-        font-size: 24px;
-        font-weight: 700;
-        color: #191F28;
-        margin: 0;
-      }
-
-      .success-desc {
-        font-size: 15px;
-        color: #8B95A1;
-        margin: 0;
-        white-space: pre-line;
-        line-height: 1.6;
-      }
-
-      .success-amount-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        width: 100%;
-        padding: 12px 0;
-        border-top: 1px solid #F2F4F6;
-      }
-
-      .success-amount-label {
-        font-size: 15px;
-        color: #4E5968;
-      }
-
-      .success-amount-value {
-        font-size: 15px;
-        font-weight: 600;
-        color: #3182F6;
-      }
-
-      .success-timer {
-        font-size: 13px;
-        color: #B0B8C1;
-        margin: 0;
-      }
-
-      .success-confirm-btn {
-        width: 100%;
-        height: 52px;
-        border-radius: 12px;
-        background: #3182F6;
-        color: #fff;
-        font-size: 17px;
-        font-weight: 600;
-        border: none;
-        cursor: pointer;
-        margin-top: 8px;
-      }
-    </style>
     <script>
       // payment.html — 100% 메디캐시 success-only page.
       //
@@ -119,7 +33,8 @@
       //   1. Reads dispatch + pointUse from sessionStorage (set by order.html).
       //   2. Opens WS B, sends device.register.
       //   3. Sends session.result(tossResponse: null, charged=0).
-      //   4. Renders the custom 수납 완료 success screen.
+      //   4. Renders the 수납 완료 success screen via sdk.template.renderResultPage
+      //      (Toss Template API — required for 검수 통과).
       //   5. Navigates to home.html via location.href on timer / 확인 tap.
       //      NOT sdk.app.setIdle() — known blank-WebView lifecycle bug
       //      (design doc §3.2).
@@ -153,70 +68,38 @@
         }
       }
 
-      // Escape user-controlled strings before injecting into innerHTML.
-      function escHtml(str) {
-        return String(str)
-          .replace(/&/g, "&amp;")
-          .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;")
-          .replace(/"/g, "&quot;");
-      }
-
-      // ── CUSTOM SUCCESS SCREEN ────────────────────────────────────────
-      // Renders the 수납 완료 success screen using custom HTML.
-      // spec §3 "Explicitly NOT used": sdk.template.renderResultPage is NOT used.
-      // spec §6.2: plugin renders custom 수납 완료 success screen.
-      // Auto-redirects to home.html after 5 seconds (matching prior timerMs:5000).
+      // ── SUCCESS SCREEN (Template API) ────────────────────────────────
+      // Renders the 수납 완료 success screen via sdk.template.renderResultPage
+      // (type:"image", status:"success") — required by Toss review: "프론트
+      // 플러그인은 반드시 Template API를 사용해야 합니다" (frontend spec §2.4).
+      // Replaces the previous custom innerHTML screen.
+      //
+      // Navigation stays on location.href = "./home.html" for BOTH the timer
+      // and the 확인 button — deliberately NOT sdk.app.setIdle() (known
+      // blank-WebView lifecycle bug, design doc §3.2 / final-flow §3.2). The
+      // 5s auto-redirect is owned by the template's timerMs (range 3000–10000,
+      // matching the prior 5000ms countdown).
+      //
+      // The 메디캐시 사용 amount is folded into `description`: ImageResultPage
+      // exposes only title/description/buttons/timer — no dedicated amount-row
+      // slot like the old custom markup had.
       function renderMedicashSuccessPage(hospitalName, pointUse) {
-        const SUCCESS_TIMER_MS = 5000;
-
-        // Declare before innerHTML so the click handler shares the same binding.
-        let countdown = null;
-
-        document.getElementById("app").innerHTML = `
-          <div class="success-page">
-            <div class="success-body">
-              <div class="success-icon-wrap">
-                <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
-                  <circle cx="18" cy="18" r="18" fill="#3182F6"/>
-                  <path d="M10 18.5l5.5 5.5 10.5-11"
-                        stroke="#fff" stroke-width="2.5"
-                        stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-              </div>
-              <h1 class="success-title">수납 완료</h1>
-              <p class="success-desc">${escHtml(hospitalName)}에\n방문해주셔서 감사합니다</p>
-              <div class="success-amount-row">
-                <span class="success-amount-label">메디캐시 사용</span>
-                <span class="success-amount-value">${Number(pointUse).toLocaleString()}캐시</span>
-              </div>
-            </div>
-            <p class="success-timer" id="successTimer">${SUCCESS_TIMER_MS / 1000}초 후 자동으로 이동합니다</p>
-            <button class="success-confirm-btn" id="successConfirm">확인</button>
-          </div>
-        `;
-
-        document.getElementById("successConfirm").addEventListener("click", () => {
-          if (countdown != null) {
-            clearInterval(countdown);
-            countdown = null;
-          }
+        const goHome = () => {
           location.href = "./home.html";
-        });
+        };
 
-        let remaining = SUCCESS_TIMER_MS / 1000;
-        const timerEl = document.getElementById("successTimer");
-        countdown = setInterval(() => {
-          remaining -= 1;
-          if (timerEl) {
-            timerEl.textContent = `${remaining}초 후 자동으로 이동합니다`;
-          }
-          if (remaining <= 0) {
-            clearInterval(countdown);
-            countdown = null;
-            location.href = "./home.html";
-          }
-        }, 1000);
+        sdk.template.renderResultPage({
+          type: "image",
+          status: "success",
+          title: "수납 완료",
+          description: `${hospitalName}에\n방문해주셔서 감사합니다\n메디캐시 ${Number(
+            pointUse,
+          ).toLocaleString()}캐시 사용`,
+          timerMs: 5000,
+          localeCode: "ko",
+          onTimeout: goHome,
+          buttons: [{ label: "확인", onClick: goHome }],
+        });
       }
 
       // ── BOOT ────────────────────────────────────────────────────────
@@ -342,10 +225,9 @@
             sessionStorage.removeItem("smartdoctor.dispatch");
             sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
 
-            // 8. Render the custom 수납 완료 success screen.
-            //    spec §3 "Explicitly NOT used": sdk.template.renderResultPage
-            //    is NOT used — custom HTML for 100% 메디캐시 (frontend MD §6.2).
-            //    sdk.app.getMerchant() is still used here (§3 "Still used").
+            // 8. Render the 수납 완료 success screen via the Template API
+            //    (sdk.template.renderResultPage). sdk.app.getMerchant() is
+            //    still used here to fill the hospital name (§3 "Still used").
             const { name: hospitalName } = await sdk.app.getMerchant();
             closeWs(ws);
             renderMedicashSuccessPage(hospitalName, pointUse);
