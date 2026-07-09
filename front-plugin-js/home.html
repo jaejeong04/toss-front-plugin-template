@@ -35,15 +35,15 @@
         //    name (sdk.app.getMerchant().name) below the default illustration.
         sdk.template.renderIdlePage({ type: "default" });
 
-        // 1a. Open serial port for NICE 카드단말기 communication. Must be active
-        //     from idle/boot so NICE doesn't show "NFC멀티패드 작동오류" while the
-        //     plugin is idle. Per Toss Slack guidance 2026-05-14.
-        window.smartdoctor.initSerialPort();
-
         // 2. Device serial — destructure (spec §2.5: returns { serialNumber }).
         //    The serial is the device identity; backend trusts it because Toss
         //    registers test devices on the partner-portal side.
         const { serialNumber } = await sdk.app.getSerialNumber();
+
+        // Reconcile/recovery dedupe: persists across reconnects so a recovery
+        // that finished pre-disconnect doesn't re-send late session.result on
+        // the next session.reconcile that arrives over a fresh socket.
+        const recoveredSessions = new Set();
 
         // Reconnect state. Exponential backoff capped at 30s; reset on successful
         // open. Backend close-code 4403 (unrecoverable trust failure / serial not
@@ -73,6 +73,17 @@
 
           let heartbeatTimer = null;
 
+          // Reconcile/recovery race guard: ws.onmessage is registered before
+          // runPendingPaymentRecovery completes, so a session.reconcile frame
+          // for the same paymentKey could race with the recovery's own
+          // session.result send. recoveryReady resolves AFTER recovery finishes
+          // (success or throw); session.reconcile awaits it before reading
+          // pending storage. Fresh promise per connection.
+          let resolveRecoveryReady;
+          const recoveryReady = new Promise((r) => {
+            resolveRecoveryReady = r;
+          });
+
           ws.onopen = async () => {
             // Successful connect → reset backoff so the next disconnect starts
             // from delay 1s, not whatever we'd escalated to before.
@@ -94,11 +105,26 @@
               }
             }, HEARTBEAT_MS);
 
+            // 9. Pending-payment recovery (spec §5). The helper no-ops when
+            //    there's no pending entry; pass the open ws so a recovered
+            //    session.result can be sent. The try/finally is load-bearing —
+            //    if recovery throws, recoveryReady must still resolve so the
+            //    session.reconcile handler doesn't deadlock.
+            try {
+              const recovered =
+                await window.smartdoctor.runPendingPaymentRecovery({ ws });
+              if (recovered && recovered.sessionId) {
+                recoveredSessions.add(recovered.sessionId);
+              }
+            } finally {
+              resolveRecoveryReady();
+            }
           };
 
           // 7. Inbound dispatcher (spec §4.2). The whole body is wrapped in
           //    try/catch so a JSON.parse / SDK rejection doesn't surface as a
-          //    silent unhandled rejection.
+          //    silent unhandled rejection. The inner try/catch around
+          //    sdk.payment.getPayment (PAYMENT_NOT_FOUND swallow) is preserved.
           ws.onmessage = async (ev) => {
             try {
               const msg = JSON.parse(ev.data);
@@ -118,36 +144,116 @@
                 case "session.dispatch": {
                   const payload = msg.payload || {};
                   // Stash the full dispatch payload so the next page can read it
-                  // without a separate backend fetch. Payload carries sessionId,
-                  // amount, orderSnapshot, pointContext per frontend MD §4.3.
+                  // without a separate backend fetch (spec §6.1, §6.2).
                   sessionStorage.setItem(
                     "smartdoctor.dispatch",
                     JSON.stringify(payload),
                   );
-                  // All dispatches are payment dispatches in the NICE-paired flow.
-                  // The legacy kind:"cancel" arm is removed — refund is out of
-                  // scope (design doc §3.3); the plugin is never involved in refund.
-                  location.href = "./order.html#" + payload.sessionId;
+                  if (payload.kind === "payment") {
+                    location.href = "./order.html#" + payload.sessionId;
+                  } else if (payload.kind === "cancel") {
+                    // Cancel flow lives in payment.html; order.html is fresh-payment-only.
+                    location.href = "./payment.html#" + payload.refundId;
+                  } else {
+                    console.warn(
+                      "[smartdoctor] session.dispatch unknown kind",
+                      payload.kind,
+                    );
+                  }
+                  return;
+                }
+
+                case "session.reconcile": {
+                  // Spec §4.2: backend suspects an EXPIRED session may actually have
+                  // succeeded on the device. Look it up locally; only respond on
+                  // success. PAYMENT_NOT_FOUND → send nothing.
+                  const paymentKey = msg.payload && msg.payload.paymentKey;
+                  const sessionId = msg.payload && msg.payload.sessionId;
+
+                  // Wait for runPendingPaymentRecovery (kicked off in ws.onopen)
+                  // to finish before touching pending storage. Otherwise this
+                  // handler and the recovery helper can both hit the same
+                  // pending entry and double-send session.result for the same
+                  // paymentKey.
+                  await recoveryReady;
+                  if (recoveredSessions.has(sessionId)) {
+                    // Recovery helper already sent session.result for this exact
+                    // sessionId; backend would just see a duplicate.
+                    return;
+                  }
+
+                  // Try to enrich with the locally-stashed pending-payment amounts;
+                  // backend falls back to its own session.chargeContext if these
+                  // are null.
+                  let pointUseAmount = null;
+                  let chargedSupplyValue = null;
+                  let chargedTax = null;
+                  // Best-effort enrichment only — a corrupt pending blob must
+                  // NOT abort the getPayment recovery below, so isolate it.
+                  try {
+                    const { value: pendingJson } = await sdk.storage.get({
+                      key: window.smartdoctor.PENDING_KEY,
+                    });
+                    if (pendingJson) {
+                      const pending = JSON.parse(pendingJson);
+                      if (pending && pending.paymentKey === paymentKey) {
+                        pointUseAmount = pending.pointUseAmount ?? null;
+                        chargedSupplyValue = pending.chargedSupplyValue ?? null;
+                        chargedTax = pending.chargedTax ?? null;
+                      }
+                    }
+                  } catch (e) {
+                    console.warn("[smartdoctor] reconcile pending read failed", e);
+                  }
+
+                  try {
+                    const result = await sdk.payment.getPayment({ paymentKey });
+                    if (ws.readyState === WebSocket.OPEN) {
+                      ws.send(
+                        JSON.stringify({
+                          type: "session.result",
+                          payload: {
+                            sessionId,
+                            pointUseAmount,
+                            chargedSupplyValue,
+                            chargedTax,
+                            tossResponse: result,
+                            late: true,
+                          },
+                        }),
+                      );
+                      // Dedupe a second reconcile for the same session across
+                      // reconnects, and drop the pending record now that the
+                      // late result has been posted.
+                      recoveredSessions.add(sessionId);
+                      await sdk.storage.remove({
+                        key: window.smartdoctor.PENDING_KEY,
+                      });
+                    }
+                  } catch (e) {
+                    // PAYMENT_NOT_FOUND is the documented expected outcome — spec
+                    // mandates "send nothing", so we explicitly swallow it. Any
+                    // other error: log; backend keeps the session in EXPIRED.
+                    // TODO(verify-error-shape): SDK error shape isn't publicly documented — verify on real device.
+                    if (e && e.code === "PAYMENT_NOT_FOUND") {
+                      return;
+                    }
+                    console.warn("[smartdoctor] session.reconcile error", e);
+                  }
                   return;
                 }
 
                 case "session.abort": {
-                  // CRM-driven abort (reason: "ABORTED_BY_CRM") relayed by BE.
-                  // Navigate to home.html via location.href — do NOT call
-                  // sdk.app.setIdle() here: known blank-WebView lifecycle bug
-                  // when setIdle() is called from a page other than the one Toss
-                  // firmware expects (design doc §3.2). On home.html this is
-                  // effectively a no-op page reload, which is fine.
+                  // CRM-driven abort (ABORTED_BY_CRM) relayed by BE. Navigate to
+                  // home.html via location.href — NOT sdk.app.setIdle() (known
+                  // blank-WebView lifecycle bug; docs/toss-client-mode-flow.md §8
+                  // / findings.md). On home.html this is a harmless reload.
                   console.log("[smartdoctor] session.abort", msg.payload);
                   location.href = "./home.html";
                   return;
                 }
 
                 case "error": {
-                  // Plugin-initiated message errors are typically handled on the
-                  // page that initiated the message (order.html / payment.html).
-                  // On home.html the plugin is already at rest; an error frame
-                  // arriving here is informational — log and do nothing.
                   const p = msg.payload || {};
                   console.warn(
                     "[smartdoctor] backend error",
@@ -173,8 +279,8 @@
 
           // 8. On close — clear heartbeat, log, schedule reconnect unless backend
           //    rejected the serial outright (close code 4403). The reconnect
-          //    re-runs ws.onopen which re-issues device.register + heartbeat,
-          //    restoring the dispatcher.
+          //    re-runs ws.onopen which re-issues device.register + heartbeat +
+          //    runPendingPaymentRecovery, restoring the dispatcher.
           ws.onclose = (ev) => {
             if (heartbeatTimer != null) {
               clearInterval(heartbeatTimer);
@@ -195,13 +301,6 @@
           };
 
           ws.onerror = (ev) => {
-            // Mirror ws.onclose cleanup: in some non-standard teardowns onerror
-            // can fire without an immediately-following onclose, leaving the
-            // heartbeat firing on a dead socket. Cheap to clear defensively.
-            if (heartbeatTimer != null) {
-              clearInterval(heartbeatTimer);
-              heartbeatTimer = null;
-            }
             console.warn("[smartdoctor] ws error", ev);
           };
         }

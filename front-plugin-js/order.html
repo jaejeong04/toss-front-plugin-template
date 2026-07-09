@@ -46,13 +46,22 @@
 
         const { serialNumber } = await sdk.app.getSerialNumber();
 
-        // Open serial port for NICE 카드단말기 communication. Open immediately
-        // so it's active during the medicash UI phase and into reader mode —
-        // not just after chargeContext. Per Toss Slack guidance 2026-05-14.
-        window.smartdoctor.initSerialPort();
-
         const ws = new WebSocket(window.smartdoctor.pluginWsUrl(serialNumber));
         let heartbeatTimer = null;
+
+        // Connect watchdog: claim + 메디캐시 UI run inside ws.onopen, so if WS B
+        // never connects onopen never fires and the kiosk would sit blank. Bail
+        // to home.html after 10s if still not open (cleared in ws.onopen).
+        // Nothing has been claimed/sent yet, so bailing is safe.
+        const connectWatchdog = setTimeout(() => {
+          if (ws.readyState !== WebSocket.OPEN) {
+            console.warn("[smartdoctor] order.html WS B connect timeout");
+            try {
+              ws.close();
+            } catch (e) {}
+            location.href = "./home.html";
+          }
+        }, 10000);
 
         function sendAbortAndGoHome() {
           if (ws.readyState === WebSocket.OPEN) {
@@ -70,6 +79,7 @@
         }
 
         ws.onopen = () => {
+          clearTimeout(connectWatchdog);
           ws.send(
             JSON.stringify({
               type: "device.register",
@@ -93,10 +103,11 @@
           // CONNECTING (not OPEN) when synchronous main() finishes, so a
           // top-level handlePointChoice(0) — the no-medicash skip path —
           // would hit the `ws.readyState === OPEN` guard inside it and
-          // silently drop `session.chargeContext`. CRM forwards that
-          // message to NICE 카드단말기 to trigger card approval; without
-          // it, the session sits IN_PROGRESS for 3 minutes until backend
-          // expiry. Running this inside onopen guarantees readyState is
+          // silently drop `session.chargeContext`. BE needs that message to
+          // record the post-메디캐시 amounts and drive the 메디캐시 deduction;
+          // without it the session sits IN_PROGRESS until backend expiry.
+          // (In client mode payment.html — not NICE — runs the card payment.)
+          // Running this inside onopen guarantees readyState is
           // OPEN, so the send goes through. The medicash-UI branch is
           // race-free either way because the user click happens long
           // after onopen, but co-locating both branches keeps the entry
@@ -234,36 +245,16 @@
             String(pointUse),
           );
 
-          // 100%-메디캐시: skip NICE entirely; payment.html sends session.result
-          // with tossResponse: null directly (existing skip path).
-          if (charged === 0) {
-            closeWs(ws);
-            location.href = "./payment.html#" + sessionId;
-            return;
-          }
-
-          // Reader mode: plugin acts as a passive serial bridge between NICE
-          // 카드단말기 and Toss's internal VAN module. Per Toss Slack guidance
-          // (channel C0ANAJW463E msg 1778737088, 2026-05-14):
-          // - Toss FRONT auto-overlays 통합결제창 when NICE triggers
-          // - Plugin does NOT call sdk.payment.requestPayment
-          // - Plugin does NOT send session.result (CRM forwards from NICE)
-          enterReaderMode();
-        }
-
-        function enterReaderMode() {
-          // Switch UI to Toss's idle page — Toss SDK auto-overlays the
-          // 통합결제창 on top when NICE 카드단말기 triggers via serial.
-          // The serial port was already opened at main() start via
-          // window.smartdoctor.initSerialPort(), so all we do here is
-          // change the UI from the medicash page to idle.
-          //
-          // Note (2026-05-14): we tested removing this call to rule it out
-          // as the trigger for NICE's "단말기나 POS가 취소 시 처리 불가
-          // 카드(CD)" error during credit approval. Same error persisted,
-          // so renderIdlePage is NOT the cause — restored for cleaner UX
-          // (idle page instead of stale medicash UI behind firmware overlay).
-          sdk.template.renderIdlePage({ type: "default" });
+          // Client mode: BOTH the card path (charged > 0) and the 100%-메디캐시
+          // path (charged === 0) hand off to payment.html, which branches on
+          // `charged` — it calls sdk.payment.requestPayment for the card, or
+          // sends session.result(tossResponse: null) for 100% 메디캐시.
+          // (Was reader-mode enterReaderMode() before the client-mode switch.)
+          // See docs/toss-client-mode-flow.md §6.1 / §8.
+          // Navigation tears down this socket; no explicit closeWs — calling
+          // close() here can race the buffered session.chargeContext flush, and
+          // payment.html's session.result re-carries the amounts as a backstop.
+          location.href = "./payment.html#" + sessionId;
         }
 
         function renderMedicashPage() {

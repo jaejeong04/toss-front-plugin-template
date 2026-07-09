@@ -26,40 +26,48 @@
   <body>
     <div id="app"></div>
     <script>
-      // payment.html — 100% 메디캐시 success-only page.
+      // payment.html — terminal page for two flows dispatched by home.html
+      // (spec §6.2 doPayment, §4.2/§4.3 cancel/refund). Reads the dispatch
+      // payload stashed in sessionStorage, opens its own WS B, then either
+      // calls sdk.payment.requestPayment (payment) or
+      // sdk.payment.requestPaymentCancel (refund) and reports the result.
       //
-      // Reached only when order.html detects charged === 0 (full medicash
-      // coverage) and navigates here. This page:
-      //   1. Reads dispatch + pointUse from sessionStorage (set by order.html).
-      //   2. Opens WS B, sends device.register.
-      //   3. Sends session.result(tossResponse: null, charged=0).
-      //   4. Renders the 수납 완료 success screen via sdk.template.renderResultPage
-      //      (Toss Template API — required for 검수 통과).
-      //   5. Navigates to home.html via location.href on timer / 확인 tap.
-      //      NOT sdk.app.setIdle() — known blank-WebView lifecycle bug
-      //      (design doc §3.2).
-      //
-      // Removed in this cleanup (NICE-paired finalized architecture):
-      //   - runPayment non-zero-charge branch (sdk.payment.requestPayment)
-      //   - runCancel / sdk.payment.requestPaymentCancel (refund out of scope)
-      //   - dispatch.kind dispatch arms (kind removed from envelope, §4.3)
-      //   - pendingPayment storage write / PENDING_KEY
-      //   - mapTossFailureToKorean, mapPaymentMethodToKorean (card-only helpers)
-      //   - retry CTA (card payment failure path)
-      //   - renderBackendErrorPage (not needed; error frame goes straight to
-      //     toast + home.html per frontend MD §7.6)
-      //
-      // spec refs: frontend MD §6.2 (100% 메디캐시 happy path), §7.6 (error
-      // frame), §4.3 (session.result envelope), design doc §3.2 + §6.
+      // No pending-payment recovery on this page — recovery runs on home.html
+      // (spec §5). Skipping it here avoids a race where a stale recovery
+      // overwrites the new pending-payment storage we're about to write.
 
-      // Spec §4.1: ping every 20s to keep the socket alive.
+      // Spec §4.1: client sends ping every 20s; backend drops after 3 misses.
+      // The user can sit on the Toss native payment UI for up to timeoutMs
+      // (default 60s), so we ping to keep the socket alive during that window.
       const HEARTBEAT_MS = 20000;
 
+      // Helper: spec §6.2 mapTossFailureToKorean.
+      function mapTossFailureToKorean(result) {
+        if (result.type === "TIMEOUT") return "시간 초과";
+        if (result.type === "CANCELED") return "승인 거절";
+        // TODO(verify-error-shape): Toss failure-code → Korean mapping is
+        // GAP per spec §6.2 — extend after real-device verification.
+        return "통신 오류";
+      }
+
+      // Helper: spec §6.2 mapPaymentMethodToKorean.
+      function mapPaymentMethodToKorean(result) {
+        const m = result.response && result.response.paymentMethod;
+        if (m === "CARD") return "카드";
+        if (m === "BARCODE") return "QR/바코드";
+        if (m === "CASH") return "현금";
+        return "—";
+      }
+
       // Send a JSON message over WS B, gated by readyState. Spec §4.3.
+      // Returns true only when the frame actually went out on an OPEN socket.
+      // Callers use this to decide whether it's safe to drop recovery state.
       function sendWs(ws, message) {
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify(message));
+          return true;
         }
+        return false;
       }
 
       function closeWs(ws) {
@@ -68,65 +76,479 @@
         }
       }
 
-      // ── SUCCESS SCREEN (Template API) ────────────────────────────────
-      // Renders the 수납 완료 success screen via sdk.template.renderResultPage
-      // (type:"image", status:"success") — required by Toss review: "프론트
-      // 플러그인은 반드시 Template API를 사용해야 합니다" (frontend spec §2.4).
-      // Replaces the previous custom innerHTML screen.
-      //
-      // Navigation stays on location.href = "./home.html" for BOTH the timer
-      // and the 확인 button — deliberately NOT sdk.app.setIdle() (known
-      // blank-WebView lifecycle bug, design doc §3.2 / final-flow §3.2). The
-      // 5s auto-redirect is owned by the template's timerMs (range 3000–10000,
-      // matching the prior 5000ms countdown).
-      //
-      // The 메디캐시 사용 amount is folded into `description`: ImageResultPage
-      // exposes only title/description/buttons/timer — no dedicated amount-row
-      // slot like the old custom markup had.
-      function renderMedicashSuccessPage(hospitalName, pointUse) {
-        const goHome = () => {
-          location.href = "./home.html";
-        };
+      // N-1: Guard condition helper — avoids repeating the compound check
+      // at every guard site. ref.current is set by the WS onmessage handler.
+      // A missing sessionId on the payload means "global error, always matches".
+      function isBackendErrorForSession(ref, sessionId) {
+        return ref.current && (ref.current.sessionId === sessionId || !ref.current.sessionId);
+      }
 
-        sdk.template.renderResultPage({
+      // Renders a terminal error page using a backend error payload.
+      // Both timer and button route to home.html. No custom HTML — uses
+      // sdk.template.renderResultPage exclusively. Per spec §11.
+      async function renderBackendErrorPage(payload) {
+        const reason = (payload && (payload.message || payload.code)) || "알 수 없는 오류";
+        const description = `${reason}\n잠시 후 다시 시도해 주세요`;
+        await sdk.template.renderResultPage({
           type: "image",
-          status: "success",
-          title: "수납 완료",
-          description: `${hospitalName}에\n방문해주셔서 감사합니다\n메디캐시 ${Number(
-            pointUse,
-          ).toLocaleString()}캐시 사용`,
+          status: "error",
+          title: "결제를 진행할 수 없어요",
+          description,
           timerMs: 5000,
+          onTimeout: () => { location.href = "./home.html"; },
+          buttons: [
+            {
+              label: "확인",
+              onClick: () => { location.href = "./home.html"; },
+              closeOnClick: true,
+            },
+          ],
+          // N-2: match every other terminal renderResultPage call in this
+          // file — localeCode and onBack prevent a blank WebView on back-tap.
+          onBack: () => { location.href = "./home.html"; },
           localeCode: "ko",
-          onTimeout: goHome,
-          buttons: [{ label: "확인", onClick: goHome }],
         });
       }
 
+      // ── PAYMENT FLOW ────────────────────────────────────────────────
+      // Spec §6.2. dispatch.kind === "payment".
+      async function runPayment(ws, dispatch, backendErrorRef) {
+        // 1. pointUse from order.html. Falsy/NaN → 0.
+        const pointUse =
+          Number(sessionStorage.getItem("smartdoctor.dispatch.pointUse")) || 0;
+
+        // 2. Charged amounts. Spec §6.2: tax = floor(charged / 11),
+        //    supplyValue = charged − tax. NOT charged * 0.1, NOT round.
+        const treatmentTotal =
+          dispatch.amount.supplyValue + dispatch.amount.tax;
+        // Clamp: order.html caps usableCash at treatmentTotal, but guard so a
+        // bad payload can't feed negative tax/supplyValue into requestPayment.
+        let charged = treatmentTotal - pointUse;
+        if (charged < 0) charged = 0;
+        const tax = Math.floor(charged / 11);
+        const supplyValue = charged - tax;
+
+        // 3. 100% 메디캐시 coverage — no Toss-side payment to make.
+        //     Toss docs only document non-zero requestPayment examples and don't
+        //     specify behavior at tax=0/supplyValue=0, so we skip the SDK call
+        //     entirely. Backend contract: when chargedSupplyValue === 0 AND
+        //     chargedTax === 0 AND tossResponse === null, treat as a points-only
+        //     payment (no card/cash transaction occurred).
+        // Skip the SDK call only when there is truly nothing to charge — both
+        // the discounted amount AND tip are zero. (tip is always 0 in this
+        // system; the guard keeps the card path authoritative if that changes.)
+        if (charged === 0 && (dispatch.amount.tip ?? 0) === 0) {
+          // Guard: if backend sent an error frame (e.g. rejecting the
+          // session after order.html's chargeContext), bail before sending
+          // session.result to a discarded session.
+          if (isBackendErrorForSession(backendErrorRef, dispatch.sessionId)) {
+            closeWs(ws);
+            await renderBackendErrorPage(backendErrorRef.current);
+            return;
+          }
+          sendWs(ws, {
+            type: "session.result",
+            payload: {
+              sessionId: dispatch.sessionId,
+              pointUseAmount: pointUse,
+              chargedSupplyValue: 0,
+              chargedTax: 0,
+              tossResponse: null,
+            },
+          });
+          sessionStorage.removeItem("smartdoctor.dispatch");
+          sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
+          const { name: hospitalName } = await sdk.app.getMerchant();
+          closeWs(ws);
+          sdk.template.renderResultPage({
+            type: "image",
+            status: "success",
+            title: "수납 완료",
+            description: `${hospitalName}에\n방문해주셔서 감사합니다\n메디캐시 ${Number(pointUse).toLocaleString()}캐시 사용`,
+            timerMs: 5000,
+            onTimeout: () => { location.href = "./home.html"; },
+            buttons: [
+              {
+                label: "확인",
+                onClick: () => { location.href = "./home.html"; },
+                closeOnClick: true,
+              },
+            ],
+            // Session terminal at this point — back-arrow just escapes
+            // to OS idle. Without this, a back-tap on the success
+            // screen blanks the WebView (see also: timeout/cancel page
+            // bug fix in this commit). All terminal renders get the
+            // same onBack.
+            onBack: () => { location.href = "./home.html"; },
+            localeCode: "ko",
+          });
+          return;
+        }
+
+        // 4. Persist pendingPayment BEFORE requestPayment. paymentKey ===
+        //    sessionId per spec §4.2. Used by home.html's recovery helper
+        //    if this page crashes.
+        await sdk.storage.set({
+          key: window.smartdoctor.PENDING_KEY,
+          value: JSON.stringify({
+            sessionId: dispatch.sessionId,
+            paymentKey: dispatch.sessionId,
+            pointUseAmount: pointUse,
+            chargedSupplyValue: supplyValue,
+            chargedTax: tax,
+          }),
+        });
+
+        // 5. Request payment. Spec §2.1 / §7: cash excluded literally.
+
+        // Bail if backend rejected the session — error frame may have arrived
+        // during the WS handoff from order.html or at any point before this.
+        // Without this guard the real card would be charged on a session backend
+        // has already discarded. Real-money critical.
+        if (isBackendErrorForSession(backendErrorRef, dispatch.sessionId)) {
+          // IM-1: close ws before rendering error page so heartbeat timer
+          // stops pinging a backend that already errored. Clear the pending
+          // record too — we bail BEFORE requestPayment, so no card was charged.
+          await sdk.storage.remove({ key: window.smartdoctor.PENDING_KEY });
+          closeWs(ws);
+          await renderBackendErrorPage(backendErrorRef.current);
+          return;
+        }
+
+        const result = await sdk.payment.requestPayment({
+          paymentKey: dispatch.sessionId,
+          tax,
+          supplyValue,
+          tip: dispatch.amount.tip ?? 0,
+          timeoutMs: dispatch.timeoutMs ?? 60000,
+          localeCode: "ko",
+          excludePaymentTypes: ["CASH"],
+        }).catch((err) => {
+          console.error("[smartdoctor] requestPayment failed", err);
+          return null;
+        });
+
+        if (!result) {
+          // Do NOT remove PENDING_KEY here: if the bridge rejected AFTER the
+          // card was approved on-device, home.html recovery must still be able
+          // to getPayment(paymentKey) and post a late session.result. Recovery
+          // self-cleans on PAYMENT_NOT_FOUND if nothing was actually charged.
+          sessionStorage.removeItem("smartdoctor.dispatch");
+          sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
+          closeWs(ws);
+          await renderBackendErrorPage({ message: "결제 처리 중 오류가 발생했어요" });
+          return;
+        }
+
+        // RC-1: post-await re-check. An error frame that arrived DURING the
+        // requestPayment call (user held the terminal for minutes) is now in
+        // backendErrorRef. If we don't check here we'd send session.result to
+        // a session backend has already discarded and render a stale page.
+        // Clean up pending storage first so recovery on home.html doesn't
+        // re-attempt a session that's already gone.
+        if (isBackendErrorForSession(backendErrorRef, dispatch.sessionId)) {
+          await sdk.storage.remove({ key: window.smartdoctor.PENDING_KEY });
+          closeWs(ws);
+          await renderBackendErrorPage(backendErrorRef.current);
+          return;
+        }
+
+        // 6. session.result on the live path (no `late: true`). Spec §4.3.
+        //    Send FIRST, then clear pendingPayment ONLY if the frame actually
+        //    went out on an open socket. If WS B dropped during the (up to 60s)
+        //    requestPayment await, the card is already charged — keeping the
+        //    pending record lets home.html recovery re-post with late:true.
+        //    Per §6.5, a non-success result carries pointUseAmount:0 (medicash
+        //    is deducted only on SUCCEEDED).
+        const resultSent = sendWs(ws, {
+          type: "session.result",
+          payload: {
+            sessionId: dispatch.sessionId,
+            pointUseAmount: result.type === "SUCCESS" ? pointUse : 0,
+            chargedSupplyValue: supplyValue,
+            chargedTax: tax,
+            tossResponse: result,
+          },
+        });
+        if (resultSent) {
+          await sdk.storage.remove({ key: window.smartdoctor.PENDING_KEY });
+        }
+
+        // 7. sessionStorage hygiene — dispatch + pointUse have been consumed.
+        sessionStorage.removeItem("smartdoctor.dispatch");
+        sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
+
+        // 9. Render terminal screen.
+        if (result.type === "SUCCESS") {
+          // Spec §6.2 / PDF p.13: renderResultPage with image+success.
+          const { name: hospitalName } = await sdk.app.getMerchant();
+          closeWs(ws);
+          sdk.template.renderResultPage({
+            type: "image",
+            status: "success",
+            title: "수납 완료",
+            description: `${hospitalName}에\n 방문해주셔서 감사합니다`,
+            timerMs: 5000,
+            onTimeout: () => { location.href = "./home.html"; },
+            buttons: [
+              {
+                label: "확인",
+                onClick: () => { location.href = "./home.html"; },
+                closeOnClick: true,
+              },
+            ],
+            // Session terminal at this point — back-arrow just escapes
+            // to OS idle. Without this, a back-tap on the success
+            // screen blanks the WebView (see also: timeout/cancel page
+            // bug fix in this commit). All terminal renders get the
+            // same onBack.
+            onBack: () => { location.href = "./home.html"; },
+            localeCode: "ko",
+          });
+        } else {
+          // Non-success (CANCELED / TIMEOUT): render the itemized "cancelled"
+          // screen via renderOrderResultPage (type:"cancelled" — a valid SDK
+          // result type). No retry CTA — the session is terminal (see cta note
+          // below); CRM must start a new session.create to retry.
+          closeWs(ws);
+          sdk.template.renderOrderResultPage({
+            type: "cancelled",
+            order: {
+              items: (dispatch.orderSnapshot && dispatch.orderSnapshot.items) || [],
+              summary: {
+                totalAmount: treatmentTotal,
+                items: [
+                  {
+                    label: "진료 금액",
+                    value: `${treatmentTotal.toLocaleString()}원`,
+                    theme: "blue",
+                  },
+                  ...(pointUse > 0
+                    ? [
+                        {
+                          label: "메디캐시 사용",
+                          value: `-${pointUse.toLocaleString()}캐시`,
+                          theme: "blue",
+                        },
+                      ]
+                    : []),
+                  {
+                    label: "취소 사유",
+                    value: mapTossFailureToKorean(result),
+                    theme: "red",
+                  },
+                  {
+                    label: "결제 수단",
+                    value: mapPaymentMethodToKorean(result),
+                    theme: "blue",
+                  },
+                  {
+                    label: "결제 취소",
+                    value: `${charged.toLocaleString()}원`,
+                    theme: "red",
+                  },
+                ],
+              },
+            },
+            cta: {
+              text: "확인",
+              // No retry CTA: backend already terminalized this session
+              // when we sent session.result above. Re-trying would re-send
+              // chargeContext for a session backend has discarded. CRM
+              // must initiate a new session.create for retries (one
+              // session = one payment attempt per spec). Navigate back to
+              // home.html which re-mounts the dispatcher.
+              onClick: () => {
+                location.href = "./home.html";
+              },
+            },
+            // Back-arrow on this failure/timeout page was the original
+            // device-bricking bug — SDK dismisses its overlay leaving
+            // a blank WebView. Session is already terminal (CANCELED/
+            // TIMEOUT recorded by backend); just escape to OS idle.
+            onBack: () => { location.href = "./home.html"; },
+          });
+        }
+      }
+
+      // ── CANCEL / REFUND FLOW ────────────────────────────────────────
+      // Spec §4.3 refund.result. dispatch.kind === "cancel".
+      async function runCancel(ws, dispatch, backendErrorRef) {
+        // 1. Pass cancelParams through as-is — backend constructed it.
+
+        // Bail if backend rejected the session before we hit the SDK.
+        // A cancel dispatch carries refundId/originalSessionId (NOT sessionId),
+        // so key the error guard on the original session id.
+        const cancelSessionId =
+          dispatch.originalSessionId ?? dispatch.cancelParams?.paymentKey;
+        if (isBackendErrorForSession(backendErrorRef, cancelSessionId)) {
+          // IM-1: close ws before rendering error page so heartbeat timer
+          // stops pinging a backend that already errored.
+          closeWs(ws);
+          await renderBackendErrorPage(backendErrorRef.current);
+          return;
+        }
+
+        const result = await sdk.payment.requestPaymentCancel(
+          dispatch.cancelParams,
+        ).catch((err) => {
+          console.error("[smartdoctor] requestPaymentCancel failed", err);
+          return null;
+        });
+
+        if (!result) {
+          sessionStorage.removeItem("smartdoctor.dispatch");
+          sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
+          closeWs(ws);
+          await renderBackendErrorPage({ message: "환불 처리 중 오류가 발생했어요" });
+          return;
+        }
+
+        // RC-1: post-await re-check. An error frame that arrived DURING the
+        // requestPaymentCancel call is now in backendErrorRef. If we don't
+        // check here we'd send refund.result to a discarded session and
+        // render a stale page. No PENDING_KEY to remove on the cancel path
+        // (storage write only happens in runPayment).
+        if (isBackendErrorForSession(backendErrorRef, cancelSessionId)) {
+          closeWs(ws);
+          await renderBackendErrorPage(backendErrorRef.current);
+          return;
+        }
+
+        // 2. refund.result over WS. Spec §4.3.
+        sendWs(ws, {
+          type: "refund.result",
+          payload: {
+            refundId: dispatch.refundId,
+            tossResponse: result,
+          },
+        });
+
+        // 3. Hygiene: clear dispatch (no pointUse on the cancel branch, but
+        //    defensively remove a stale leftover from a prior crashed session).
+        sessionStorage.removeItem("smartdoctor.dispatch");
+        sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
+
+        // 4. Render result.
+        if (result.type === "SUCCESS") {
+          const { name: hospitalName } = await sdk.app.getMerchant();
+          closeWs(ws);
+          sdk.template.renderResultPage({
+            type: "image",
+            status: "success",
+            title: "환불 완료",
+            description: `${hospitalName}에\n 방문해주셔서 감사합니다`,
+            timerMs: 5000,
+            onTimeout: () => { location.href = "./home.html"; },
+            buttons: [
+              {
+                label: "확인",
+                onClick: () => { location.href = "./home.html"; },
+                closeOnClick: true,
+              },
+            ],
+            // Session terminal at this point — back-arrow just escapes
+            // to OS idle. Without this, a back-tap on the success
+            // screen blanks the WebView (see also: timeout/cancel page
+            // bug fix in this commit). All terminal renders get the
+            // same onBack.
+            onBack: () => { location.href = "./home.html"; },
+            localeCode: "ko",
+          });
+        } else {
+          // Failure path: cancel-specific labels, no retry CTA — refund
+          // retry is backend-driven per spec.
+          const refundAmount =
+            (dispatch.cancelParams?.supplyValue ?? 0) +
+            (dispatch.cancelParams?.tax ?? 0);
+          closeWs(ws);
+          sdk.template.renderOrderResultPage({
+            type: "cancelled",
+            order: {
+              // No order snapshot on the refund branch; show an empty list.
+              items: [],
+              summary: {
+                totalAmount: refundAmount,
+                items: [
+                  {
+                    label: "환불 사유",
+                    value: mapTossFailureToKorean(result),
+                    theme: "red",
+                  },
+                  {
+                    label: "결제 수단",
+                    value: mapPaymentMethodToKorean(result),
+                    theme: "blue",
+                  },
+                  {
+                    label: "환불 금액",
+                    value: `${refundAmount.toLocaleString()}원`,
+                    theme: "red",
+                  },
+                ],
+              },
+            },
+            cta: {
+              text: "확인",
+              onClick: () => { location.href = "./home.html"; },
+            },
+            // Session terminal at this point — back-arrow just escapes
+            // to OS idle. Without this, a back-tap on the failure
+            // screen blanks the WebView (see also: timeout/cancel page
+            // bug fix in this commit). All terminal renders get the
+            // same onBack.
+            onBack: () => { location.href = "./home.html"; },
+          });
+        }
+      }
+
       // ── BOOT ────────────────────────────────────────────────────────
+      // Reads hash + dispatch payload, opens WS, dispatches to runPayment
+      // or runCancel. The `runFreshFlow` indirection lets the failure-path
+      // retry button re-run boot for a fresh WS.
       async function runFreshFlow() {
-        // 1. Dispatch payload — stashed by order.html before navigating here.
+        // Tracks the most recent backend error frame (spec §11). Wrapped in
+        // an object so runPayment/runCancel (outer-scope functions) receive a
+        // live reference via their backendErrorRef parameter — a plain `let`
+        // would be captured by value at call time and miss late-arriving frames.
+        const backendErrorRef = { current: null };
+
+        // 1. Hash id.
+        const hashId = location.hash.slice(1);
+
+        // 2. Dispatch payload — stashed by home.html on session.dispatch.
         const dispatchJson = sessionStorage.getItem("smartdoctor.dispatch");
         const dispatch = dispatchJson ? JSON.parse(dispatchJson) : null;
-        const sessionId = location.hash.slice(1);
-        if (!dispatch || (sessionId && dispatch.sessionId !== sessionId)) {
+        if (!dispatch) {
           location.href = "./home.html";
           return;
         }
 
-        // 2. pointUse stashed by order.html. Falsy/NaN → 0.
-        const pointUse =
-          Number(sessionStorage.getItem("smartdoctor.dispatch.pointUse")) || 0;
-
-        // 3. Device serial for device.register.
+        // 3. Device serial — backend trusts it via partner-portal registration.
         const { serialNumber } = await sdk.app.getSerialNumber();
 
-        // 4. Open WS B.
+        // 4. Open WS B. Wait for onopen before dispatching.
         const ws = new WebSocket(window.smartdoctor.pluginWsUrl(serialNumber));
         let heartbeatTimer = null;
 
-        // 5. Inbound handler — payment.html is terminal-side, not the
-        //    dispatcher. Handle session.abort (BE→Plugin) and error frames.
-        ws.onmessage = async (ev) => {
+        // Connect watchdog: the whole flow runs inside ws.onopen, so if WS B
+        // never connects (BE down / bad token / DNS) onopen never fires and the
+        // kiosk would sit on a blank WebView. Bail to home.html after 10s if
+        // still not open (cleared in ws.onopen). Safe: requestPayment runs
+        // inside onopen, so no card has been charged at this point.
+        const connectWatchdog = setTimeout(() => {
+          if (ws.readyState !== WebSocket.OPEN) {
+            console.warn("[smartdoctor] payment.html WS B connect timeout");
+            try {
+              ws.close();
+            } catch (e) {}
+            location.href = "./home.html";
+          }
+        }, 10000);
+
+        // 5. Minimal inbound handler — payment.html is mid-flow, not the
+        //    dispatcher. session.abort defense-in-depth per spec §8.
+        ws.onmessage = (ev) => {
           let msg;
           try {
             msg = JSON.parse(ev.data);
@@ -138,39 +560,18 @@
             case "pong":
               // Informational. Backend tracks heartbeat misses, not us.
               return;
-
             case "session.abort":
-              // BE→Plugin session.abort: CRM aborted the session.
-              // frontend MD §4.2 + design doc §4.3.
-              ws.onmessage = null;
-              if (heartbeatTimer != null) {
-                clearInterval(heartbeatTimer);
-                heartbeatTimer = null;
-              }
-              await sdk.template.openToast({
-                message: (msg.payload && msg.payload.reason) || "세션이 취소됐습니다.",
-              });
-              closeWs(ws);
-              location.href = "./home.html";
+              // Per spec §8 backend should NOT send this once we're in
+              // IN_PROGRESS — log and continue.
+              console.warn(
+                "[smartdoctor] payment.html unexpected session.abort",
+                msg.payload,
+              );
               return;
-
             case "error":
-              // Backend error frame. frontend MD §7.6, design doc §6.
-              // Toast + navigate home. No retry — session is unrecoverable.
-              ws.onmessage = null;
-              if (heartbeatTimer != null) {
-                clearInterval(heartbeatTimer);
-                heartbeatTimer = null;
-              }
-              await sdk.template.openToast({
-                message:
-                  (msg.payload && msg.payload.message) ||
-                  "오류가 발생했습니다.",
-              });
-              closeWs(ws);
-              location.href = "./home.html";
+              backendErrorRef.current = msg.payload;
+              console.warn("[smartdoctor] payment.html backend error", msg.payload);
               return;
-
             default:
               console.log("[smartdoctor] payment.html ws message", msg.type);
               return;
@@ -194,6 +595,7 @@
         };
 
         ws.onopen = async () => {
+          clearTimeout(connectWatchdog);
           // spec §4.3: first message after connect
           ws.send(
             JSON.stringify({
@@ -206,33 +608,25 @@
               ws.send(JSON.stringify({ type: "ping", payload: {} }));
             }
           }, HEARTBEAT_MS);
-
+          // 6. Dispatch by kind + hash match.
           try {
-            // 6. Send session.result — 100% 메디캐시, no card charge.
-            //    frontend MD §4.3, design doc §3.2.
-            sendWs(ws, {
-              type: "session.result",
-              payload: {
-                sessionId: dispatch.sessionId,
-                pointUseAmount: pointUse,
-                chargedSupplyValue: 0,
-                chargedTax: 0,
-                tossResponse: null,
-              },
-            });
-
-            // 7. SessionStorage hygiene — dispatch + pointUse consumed.
-            sessionStorage.removeItem("smartdoctor.dispatch");
-            sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
-
-            // 8. Render the 수납 완료 success screen via the Template API
-            //    (sdk.template.renderResultPage). sdk.app.getMerchant() is
-            //    still used here to fill the hospital name (§3 "Still used").
-            const { name: hospitalName } = await sdk.app.getMerchant();
-            closeWs(ws);
-            renderMedicashSuccessPage(hospitalName, pointUse);
+            if ((dispatch.kind || "payment") === "payment" && dispatch.sessionId === hashId) {
+              await runPayment(ws, dispatch, backendErrorRef);
+            } else if (
+              dispatch.kind === "cancel" &&
+              dispatch.refundId === hashId
+            ) {
+              await runCancel(ws, dispatch, backendErrorRef);
+            } else {
+              sessionStorage.removeItem("smartdoctor.dispatch");
+              sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
+              closeWs(ws);
+              location.href = "./home.html";
+            }
           } catch (err) {
             console.error("[smartdoctor] payment.html onopen error", err);
+            sessionStorage.removeItem("smartdoctor.dispatch");
+            sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
             closeWs(ws);
             location.href = "./home.html";
           }
