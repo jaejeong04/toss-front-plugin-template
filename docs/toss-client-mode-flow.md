@@ -325,10 +325,11 @@ Mapping (BE assigns terminal state + `failureReason` on the BE→CRM echo):
 |---|---|---|
 | `CANCELED` (user canceled / card declined?) | `CANCELED` | `USER_CANCELED` |
 | `TIMEOUT` | `EXPIRED` | `EXPIRED` |
+| `FAILED` (hard decline / insufficient funds / `requestPayment` reject) | `CANCELED` (or new `FAILED`) | `PAYMENT_DECLINED` |
 
 - **⚠️ Hard-decline representation is undocumented.** Toss lists no `FAILED` type, so a VAN reject / insufficient-funds decline likely surfaces as `CANCELED` (or a rejected Promise). **Confirm on device** which — ties to [MUST TEST T2]. The plugin must wrap `requestPayment` in `try/catch` in case a hard failure **rejects** rather than resolves.
 - **No medicash deduction** on any non-success (`RCPT_INFO.DC_AMT` untouched).
-- The session is **terminal**; a retry requires a **fresh CRM `session.create`**.
+- **Same-session retry (2026-07-13):** on a non-success attempt the plugin sends **nothing terminal** and renders the itemized failure screen (`renderOrderResultPage type:"cancelled"`, cta `다시 결제하기`). The session stays `IN_PROGRESS`; `[다시 결제하기]` re-calls `requestPayment` on the **same `sessionId`**. A terminal `session.result` fires only on `SUCCESS` or the back-arrow give-up (`FAILED` envelope); an abandoned failure screen resolves via `EXPIRED`. Give-up after a *rejected* attempt reconciles via `getPayment` first (a real charge is reported `SUCCESS`, never overwritten with `FAILED`). **Depends on:** paymentKey-reuse [MUST TEST], `getPayment` on-device [MUST TEST T3], `renderOrderResultPage.onBack` [GAP], and BE handling `FAILED`→late-`SUCCESS` (§6.4 idempotency). Supersedes the prior "retry requires a fresh CRM session.create."
 - **CRM prints no card receipt** on non-success.
 
 ---
