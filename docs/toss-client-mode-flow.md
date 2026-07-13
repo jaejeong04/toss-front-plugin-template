@@ -325,7 +325,8 @@ Mapping (BE assigns terminal state + `failureReason` on the BE→CRM echo):
 |---|---|---|
 | `CANCELED` (user canceled / card declined?) | `CANCELED` | `USER_CANCELED` |
 | `TIMEOUT` | `EXPIRED` | `EXPIRED` |
-| `FAILED` (hard decline / insufficient funds / `requestPayment` reject) | `CANCELED` (or new `FAILED`) | `PAYMENT_DECLINED` |
+| `FAILED`, `response.reason === "USER_BACKED_OUT"` (back-out before any attempt — 할부 screen back-arrow, §6.6) | `CANCELED` | `USER_CANCELED` — **not** a card decline |
+| `FAILED`, any other reason (hard decline / insufficient funds / `requestPayment` reject) | `CANCELED` (or new `FAILED`) | `PAYMENT_DECLINED` (carry `reason` through) |
 
 - **⚠️ Hard-decline representation is undocumented.** Toss lists no `FAILED` type, so a VAN reject / insufficient-funds decline likely surfaces as `CANCELED` (or a rejected Promise). **Confirm on device** which — ties to [MUST TEST T2]. The plugin must wrap `requestPayment` in `try/catch` in case a hard failure **rejects** rather than resolves.
 - **No medicash deduction** on any non-success (`RCPT_INFO.DC_AMT` untouched).
@@ -419,7 +420,7 @@ Device test 2026-07-13: the client-mode firmware payment UI does **not** prompt 
 | Plugin offline at create | 10s grace → `FAILED / DEVICE_OFFLINE` | `[REUSE §3]` |
 | Dispatched, no claim in 30s | `FAILED / PLUGIN_UNRESPONSIVE` | `[REUSE §9]` |
 | `IN_PROGRESS`, no result | `EXPIRED` after `timeoutMs + 30s` (see §9 timeout note; needs `timeoutMs` re-added to dispatch) | `[REUSE §9]` |
-| Card declined / `requestPayment` `CANCELED`/`TIMEOUT` (no `FAILED` type; decline rep undocumented) | plugin renders `renderResultPage(status:"error")`; Plugin→BE `session.result` reflects non-success; **no** medicash deduction; session terminal — retry needs a fresh CRM session (see §6.5) | §6.5 |
+| Card declined / `requestPayment` `CANCELED`/`TIMEOUT`/reject | plugin renders the itemized failure screen (`renderOrderResultPage type:"cancelled"`, cta `다시 결제하기`) and sends **nothing terminal** — session stays `IN_PROGRESS` for same-session retry (할부 re-asked per §6.6); terminal `session.result` only on `SUCCESS` or give-up (envelope per §6.5); **no** medicash deduction on non-success | §6.5, §6.6 |
 | CRM abort in CREATED/DISPATCHED | `session.abort` → CANCELED (plugin navigates home if dispatched) | `[REUSE §7]` |
 | User backs out during 메디캐시 UI (pre-chargeContext) | `session.abort (USER_BACKED_OUT)` → CANCELED | `[REUSE §8]` |
 | Abort **during** `requestPayment` (card entry) | firmware payment UI owns the moment; abort via `requestPayment` cancel/timeout semantics, not a WS abort | `[MUST TEST T2]` |

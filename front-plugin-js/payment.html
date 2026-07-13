@@ -251,6 +251,9 @@
         // discovers a real charge via getPayment. Sends session.result(SUCCESS),
         // drops pending only if the frame went out, renders the success screen.
         async function finishSuccess(result) {
+          // Terminal latch: once a SUCCESS is being reported, no later giveUp /
+          // attempt may fire a second terminal frame for this session.
+          terminalized = true;
           const resultSent = sendWs(ws, {
             type: "session.result",
             payload: {
@@ -296,6 +299,12 @@
         // charge is reported as SUCCESS, never overwritten with FAILED. A
         // resolved CANCELED/TIMEOUT means no charge, so skip the lookup.
         async function giveUp(result, rejectErr) {
+          // Mutual exclusion (panel fix, 2026-07-13): never terminalize while a
+          // requestPayment is in flight (back-tap racing an in-flight charge
+          // would send FAILED + delete the recovery record mid-charge), and
+          // never terminalize twice (double back-tap → double terminal frames).
+          if (terminalized || attemptInFlight) return;
+          terminalized = true;
           const rejected = !result; // reject path vs resolved non-success
           if (rejected) {
             // Reconcile ONLY the getPayment call under try/catch — a real charge
@@ -482,6 +491,20 @@
                   : prevRejectErr;
               giveUp(prevResult, err).catch(fatalToHome);
             },
+          }).catch((err) => {
+            // A render rejection BEFORE any interaction would strand the kiosk
+            // on a dead screen with no error path (panel fix 2026-07-13). But
+            // the SDK may also settle this promise late (e.g. on dismiss when
+            // the payment overlay replaces the page) — if an attempt/terminal
+            // path is already running, do NOT yank the flow home mid-charge.
+            if (!attemptInFlight && !terminalized) {
+              fatalToHome(err);
+            } else {
+              console.warn(
+                "[smartdoctor] renderSelectPage late rejection (ignored)",
+                err,
+              );
+            }
           });
         }
 
@@ -490,8 +513,19 @@
         // calls with the SAME paymentKey. Shared across retries; the wrapper
         // gates every invocation (initial call + cta re-invocations).
         let attemptInFlight = false;
+        // Terminal latch (panel fix, 2026-07-13): set by giveUp/finishSuccess/
+        // the backend-error bails. Blocks any late attempt() (e.g. an option
+        // tap racing a back-arrow giveUp's async getPayment gap) and any second
+        // terminal send. Referenced by giveUp above — safe: all callbacks fire
+        // only after runPayment's body (incl. this declaration) has executed.
+        let terminalized = false;
+        // True once ANY attempt has rejected. A reject may hide a completed
+        // charge (bridge dropped after on-device approval), so from then on the
+        // PENDING_KEY record must survive every bail — it is the only handle
+        // home.html recovery has to late-report that charge.
+        let hadRejectedAttempt = false;
         async function attempt() {
-          if (attemptInFlight) return; // ignore concurrent / double-tap re-entry
+          if (attemptInFlight || terminalized) return; // concurrent tap / already terminal
           attemptInFlight = true;
           try {
             await attemptOnce();
@@ -504,8 +538,14 @@
         async function attemptOnce() {
           // Re-check backend error each attempt: a frame may have arrived while
           // the failure screen was up. Bail to the terminal error page if so.
+          // PENDING_KEY is removed only when no attempt has ever rejected —
+          // after a rejected attempt this record may be the only recovery
+          // handle for a completed-but-unreported charge (panel fix 2026-07-13).
           if (isBackendErrorForSession(backendErrorRef, dispatch.sessionId)) {
-            await sdk.storage.remove({ key: window.smartdoctor.PENDING_KEY });
+            terminalized = true;
+            if (!hadRejectedAttempt) {
+              await sdk.storage.remove({ key: window.smartdoctor.PENDING_KEY });
+            }
             closeWs(ws);
             await renderBackendErrorPage(backendErrorRef.current);
             return;
@@ -526,20 +566,32 @@
             });
           } catch (err) {
             rejectErr = err;
+            hadRejectedAttempt = true; // may hide a completed charge — see decl
             console.error("[smartdoctor] requestPayment failed", err);
           }
 
-          // Post-await re-check: an error frame that arrived DURING the (up to
-          // 60s) requestPayment call is now in backendErrorRef.
-          if (isBackendErrorForSession(backendErrorRef, dispatch.sessionId)) {
-            await sdk.storage.remove({ key: window.smartdoctor.PENDING_KEY });
-            closeWs(ws);
-            await renderBackendErrorPage(backendErrorRef.current);
+          // CRITICAL ordering (panel fix 2026-07-13): a real charge outranks a
+          // backend error frame. If requestPayment resolved SUCCESS, report it
+          // FIRST — even when an error frame arrived during the call. Money
+          // moved; BE must learn that (handoff §2.3: SUCCESS wins, idempotent).
+          // The old order bailed on the error frame, deleted PENDING_KEY, and
+          // orphaned the charge with no recovery record.
+          if (result && result.type === "SUCCESS") {
+            await finishSuccess(result);
             return;
           }
 
-          if (result && result.type === "SUCCESS") {
-            await finishSuccess(result);
+          // Post-await re-check: an error frame that arrived DURING the (up to
+          // 60s) requestPayment call is now in backendErrorRef. Non-success
+          // outcomes only (SUCCESS returned above). Same PENDING_KEY rule as
+          // the pre-flight bail: keep it once any attempt has rejected.
+          if (isBackendErrorForSession(backendErrorRef, dispatch.sessionId)) {
+            terminalized = true;
+            if (!hadRejectedAttempt) {
+              await sdk.storage.remove({ key: window.smartdoctor.PENDING_KEY });
+            }
+            closeWs(ws);
+            await renderBackendErrorPage(backendErrorRef.current);
             return;
           }
 
