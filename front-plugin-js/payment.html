@@ -306,7 +306,12 @@
           if (terminalized || attemptInFlight) return;
           terminalized = true;
           const rejected = !result; // reject path vs resolved non-success
-          if (rejected) {
+          // Reconcile when the LAST attempt rejected OR when ANY prior attempt
+          // did (verify fix 2026-07-13): retries reuse the same paymentKey, so
+          // a rejected attempt #1 may hold a hidden completed charge even when
+          // attempt #2 resolved CANCELED — skipping the lookup here would
+          // forward CANCELED and orphan that charge.
+          if (rejected || hadRejectedAttempt) {
             // Reconcile ONLY the getPayment call under try/catch — a real charge
             // (bridge dropped after on-device approval) must be reported SUCCESS,
             // never overwritten with FAILED. finishSuccess() is deliberately kept
@@ -389,7 +394,14 @@
         // itemized summary; single cta 다시 결제하기 → retry (same session);
         // back arrow (onBack) → give up. Reuses the pre-Task-18 itemized layout.
         function renderFailureScreen(result, rejectErr) {
-          sdk.template.renderOrderResultPage({
+          // Same staleness token as renderInstallmentScreen: a pre-interaction
+          // render rejection routes home; a post-interaction settle is a stale
+          // dismissal from this screen's own replacement — swallow it.
+          let interacted = false;
+          // Promise.resolve() wrapper: template calls are promise-returning per
+          // docs, but if one ever returned undefined a bare .catch would throw
+          // synchronously and take the failure screen down with it.
+          Promise.resolve(sdk.template.renderOrderResultPage({
             type: "cancelled",
             order: {
               items: (dispatch.orderSnapshot && dispatch.orderSnapshot.items) || [],
@@ -436,6 +448,7 @@
               // switching to installments); below the 5만원 floor there is no
               // 할부 to ask — straight back to the card UI.
               onClick: () => {
+                interacted = true;
                 if (charged >= INSTALLMENT_MIN_AMOUNT) {
                   renderInstallmentScreen(result, rejectErr);
                 } else {
@@ -443,10 +456,22 @@
                 }
               },
             },
-            // Back arrow = give up: terminalize with FAILED so the CRM can
-            // process it. onBack support on renderOrderResultPage is [GAP] —
+            // Back arrow = give up: terminalize (envelope per §6.5) so the CRM
+            // can process it. onBack support on renderOrderResultPage is [GAP] —
             // [MUST TEST]; if it does not fire, give-up falls back to EXPIRED.
-            onBack: () => { giveUp(result, rejectErr).catch(fatalToHome); },
+            onBack: () => {
+              interacted = true;
+              giveUp(result, rejectErr).catch(fatalToHome);
+            },
+          })).catch((err) => {
+            if (!interacted && !terminalized) {
+              fatalToHome(err);
+            } else {
+              console.warn(
+                "[smartdoctor] renderOrderResultPage stale rejection (ignored)",
+                err,
+              );
+            }
           });
         }
 
@@ -468,12 +493,22 @@
           for (let m = 2; m <= 12; m++) {
             monthOptions.push({ label: m + "개월", months: m });
           }
-          sdk.template.renderSelectPage({
+          // Staleness token (verify fix 2026-07-13): every legitimate teardown
+          // of THIS screen goes through its own callbacks, so interacted===true
+          // marks any later settle of this render promise as stale. The global
+          // attemptInFlight/terminalized flags can't do this — they both read
+          // false again during failure-screen dwell, and a stale rejection then
+          // would yank the customer home off a live IN_PROGRESS retry flow.
+          let interacted = false;
+          // Promise.resolve() wrapper: same defense as renderFailureScreen —
+          // a non-promise return must not make the bare .catch throw.
+          Promise.resolve(sdk.template.renderSelectPage({
             title: "할부 개월수를 선택해주세요",
             subtitle: "카드 결제 시 적용됩니다",
             options: monthOptions.map((opt) => ({
               title: opt.label,
               onClick: () => {
+                interacted = true;
                 installmentMonths = opt.months;
                 attempt().catch(fatalToHome);
               },
@@ -485,23 +520,25 @@
             // USER_BACKED_OUT reject reason; after a failed attempt, pass the
             // real failure context through so the envelope stays truthful.
             onBack: () => {
+              interacted = true;
               const err =
                 !prevResult && !prevRejectErr
                   ? { code: "USER_BACKED_OUT" }
                   : prevRejectErr;
               giveUp(prevResult, err).catch(fatalToHome);
             },
-          }).catch((err) => {
-            // A render rejection BEFORE any interaction would strand the kiosk
-            // on a dead screen with no error path (panel fix 2026-07-13). But
-            // the SDK may also settle this promise late (e.g. on dismiss when
-            // the payment overlay replaces the page) — if an attempt/terminal
-            // path is already running, do NOT yank the flow home mid-charge.
-            if (!attemptInFlight && !terminalized) {
+          })).catch((err) => {
+            // A render rejection BEFORE any interaction means the screen never
+            // engaged — without routing home the kiosk is stranded on a dead
+            // screen (panel fix 2026-07-13). Once interacted, any settle of
+            // this promise is a stale dismissal (the screen was legitimately
+            // replaced via its own callbacks) — swallow it, never yank the
+            // customer off a live retry flow.
+            if (!interacted && !terminalized) {
               fatalToHome(err);
             } else {
               console.warn(
-                "[smartdoctor] renderSelectPage late rejection (ignored)",
+                "[smartdoctor] renderSelectPage stale rejection (ignored)",
                 err,
               );
             }
