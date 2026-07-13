@@ -209,8 +209,6 @@
           }),
         });
 
-        // 5. Request payment. Spec §2.1 / §7: cash excluded literally.
-
         // Bail if backend rejected the session — error frame may have arrived
         // during the WS handoff from order.html or at any point before this.
         // Without this guard the real card would be charged on a session backend
@@ -298,38 +296,51 @@
         async function giveUp(result, rejectErr) {
           const rejected = !result; // reject path vs resolved non-success
           if (rejected) {
+            // Reconcile ONLY the getPayment call under try/catch — a real charge
+            // (bridge dropped after on-device approval) must be reported SUCCESS,
+            // never overwritten with FAILED. finishSuccess() is deliberately kept
+            // OUTSIDE the try: its own getMerchant/render calls must NOT unwind
+            // into the FAILED path below and emit a contradictory terminal result
+            // for a session we just reported SUCCESS.
+            let recovered = null;
+            let getPaymentInconclusive = false;
             try {
-              const recovered = await sdk.payment.getPayment({
+              recovered = await sdk.payment.getPayment({
                 paymentKey: dispatch.sessionId,
               });
-              if (recovered && recovered.type === "SUCCESS") {
-                await finishSuccess(recovered);
-                return;
-              }
-              // Not found / non-success → nothing was charged; fall through.
             } catch (e) {
-              // PAYMENT_NOT_FOUND is the documented "nothing charged" outcome.
-              // Any OTHER error (getPayment unavailable/transient): be
-              // conservative — send FAILED but KEEP pending so home.html
-              // recovery can still reconcile a late success (contract §3).
+              // PAYMENT_NOT_FOUND is the documented "nothing charged" outcome →
+              // fall through to the FAILED send below. Any OTHER error (getPayment
+              // unavailable/transient) is inconclusive: be conservative — send
+              // FAILED but KEEP pending so home.html recovery can still reconcile
+              // a late success (contract §3).
               if (!(e && e.code === "PAYMENT_NOT_FOUND")) {
                 console.warn("[smartdoctor] give-up getPayment error", e);
-                sendWs(ws, {
-                  type: "session.result",
-                  payload: {
-                    sessionId: dispatch.sessionId,
-                    pointUseAmount: 0,
-                    chargedSupplyValue: supplyValue,
-                    chargedTax: tax,
-                    tossResponse: buildFailedResponse(result, rejectErr),
-                  },
-                });
-                sessionStorage.removeItem("smartdoctor.dispatch");
-                sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
-                closeWs(ws);
-                location.href = "./home.html";
-                return;
+                getPaymentInconclusive = true;
               }
+            }
+            if (recovered && recovered.type === "SUCCESS") {
+              await finishSuccess(recovered);
+              return;
+            }
+            if (getPaymentInconclusive) {
+              sendWs(ws, {
+                type: "session.result",
+                payload: {
+                  sessionId: dispatch.sessionId,
+                  pointUseAmount: 0,
+                  chargedSupplyValue: supplyValue,
+                  chargedTax: tax,
+                  tossResponse: buildFailedResponse(result, rejectErr),
+                },
+              });
+              // KEEP pending: getPayment was inconclusive, a real charge may yet
+              // surface via reconcile.
+              sessionStorage.removeItem("smartdoctor.dispatch");
+              sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
+              closeWs(ws);
+              location.href = "./home.html";
+              return;
             }
           }
 
@@ -349,6 +360,15 @@
           sessionStorage.removeItem("smartdoctor.dispatch");
           sessionStorage.removeItem("smartdoctor.dispatch.pointUse");
           closeWs(ws);
+          location.href = "./home.html";
+        }
+
+        // Fatal handler for the async UI callbacks in renderFailureScreen. A
+        // throw inside a re-invoked attempt()/giveUp() (e.g. an SDK render/bridge
+        // call rejecting) would otherwise be an unhandled rejection with no error
+        // page, stranding the kiosk on a stale screen. Route it home instead.
+        function fatalToHome(err) {
+          console.error("[smartdoctor] payment.html retry callback fatal", err);
           location.href = "./home.html";
         }
 
@@ -399,17 +419,32 @@
               text: "다시 결제하기",
               // Retry on the SAME session — no terminal result was sent, so the
               // backend session is still IN_PROGRESS and this re-attempt is valid.
-              onClick: () => { attempt(); },
+              onClick: () => { attempt().catch(fatalToHome); },
             },
             // Back arrow = give up: terminalize with FAILED so the CRM can
             // process it. onBack support on renderOrderResultPage is [GAP] —
             // [MUST TEST]; if it does not fire, give-up falls back to EXPIRED.
-            onBack: () => { giveUp(result, rejectErr); },
+            onBack: () => { giveUp(result, rejectErr).catch(fatalToHome); },
           });
         }
 
-        // One payment attempt on the same session.
+        // Re-entrancy guard: a double-tap on 다시 결제하기 before the native
+        // payment overlay takes over would otherwise fire two requestPayment
+        // calls with the SAME paymentKey. Shared across retries; the wrapper
+        // gates every invocation (initial call + cta re-invocations).
+        let attemptInFlight = false;
         async function attempt() {
+          if (attemptInFlight) return; // ignore concurrent / double-tap re-entry
+          attemptInFlight = true;
+          try {
+            await attemptOnce();
+          } finally {
+            attemptInFlight = false;
+          }
+        }
+
+        // One payment attempt on the same session.
+        async function attemptOnce() {
           // Re-check backend error each attempt: a frame may have arrived while
           // the failure screen was up. Bail to the terminal error page if so.
           if (isBackendErrorForSession(backendErrorRef, dispatch.sessionId)) {
@@ -429,7 +464,7 @@
               tip: dispatch.amount.tip ?? 0,
               timeoutMs: dispatch.timeoutMs ?? 60000,
               localeCode: "ko",
-              excludePaymentTypes: ["CASH"],
+              excludePaymentTypes: ["CASH"], // spec §2.1 / §7: cash excluded
             });
           } catch (err) {
             rejectErr = err;
@@ -591,8 +626,8 @@
 
       // ── BOOT ────────────────────────────────────────────────────────
       // Reads hash + dispatch payload, opens WS, dispatches to runPayment
-      // or runCancel. The `runFreshFlow` indirection lets the failure-path
-      // retry button re-run boot for a fresh WS.
+      // or runCancel. (The failure-path 다시 결제하기 retry runs in-page via
+      // attempt() on the existing WS B — it does NOT re-run boot.)
       async function runFreshFlow() {
         // Tracks the most recent backend error frame (spec §11). Wrapped in
         // an object so runPayment/runCancel (outer-scope functions) receive a
