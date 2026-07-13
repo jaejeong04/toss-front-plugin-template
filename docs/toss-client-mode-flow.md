@@ -329,8 +329,17 @@ Mapping (BE assigns terminal state + `failureReason` on the BE→CRM echo):
 
 - **⚠️ Hard-decline representation is undocumented.** Toss lists no `FAILED` type, so a VAN reject / insufficient-funds decline likely surfaces as `CANCELED` (or a rejected Promise). **Confirm on device** which — ties to [MUST TEST T2]. The plugin must wrap `requestPayment` in `try/catch` in case a hard failure **rejects** rather than resolves.
 - **No medicash deduction** on any non-success (`RCPT_INFO.DC_AMT` untouched).
-- **Same-session retry (2026-07-13):** on a non-success attempt the plugin sends **nothing terminal** and renders the itemized failure screen (`renderOrderResultPage type:"cancelled"`, cta `다시 결제하기`). The session stays `IN_PROGRESS`; `[다시 결제하기]` re-calls `requestPayment` on the **same `sessionId`**. A terminal `session.result` fires only on `SUCCESS` or the back-arrow give-up (`FAILED` envelope); an abandoned failure screen resolves via `EXPIRED`. Give-up after a *rejected* attempt reconciles via `getPayment` first (a real charge is reported `SUCCESS`, never overwritten with `FAILED`). **Depends on:** paymentKey-reuse [MUST TEST], `getPayment` on-device [MUST TEST T3], `renderOrderResultPage.onBack` [GAP], and BE handling `FAILED`→late-`SUCCESS` (§6.4 idempotency). Supersedes the prior "retry requires a fresh CRM session.create."
+- **Same-session retry (2026-07-13):** on a non-success attempt the plugin sends **nothing terminal** and renders the itemized failure screen (`renderOrderResultPage type:"cancelled"`, cta `다시 결제하기`). The session stays `IN_PROGRESS`; `[다시 결제하기]` re-calls `requestPayment` on the **same `sessionId`**. A terminal `session.result` fires only on `SUCCESS` or the back-arrow give-up — the give-up envelope forwards a resolved `CANCELED`/`TIMEOUT` **unchanged** (mapping per the table above); `FAILED` is synthesized only for the reject path (no result object), incl. `USER_BACKED_OUT` for a back-out before any attempt. An abandoned failure screen resolves via `EXPIRED`. Give-up after a *rejected* attempt reconciles via `getPayment` first (a real charge is reported `SUCCESS`, never overwritten with `FAILED`). **Depends on:** paymentKey-reuse [MUST TEST], `getPayment` on-device [MUST TEST T3], `renderOrderResultPage.onBack` [GAP], and BE handling `FAILED`→late-`SUCCESS` (§6.4 idempotency). Supersedes the prior "retry requires a fresh CRM session.create."
 - **CRM prints no card receipt** on non-success.
+
+### 6.6 할부 (installment) selection — plugin-owned (2026-07-13)
+
+Device test 2026-07-13: the client-mode firmware payment UI does **not** prompt for 할부 — the plugin owns selection. `payment.html` renders `sdk.template.renderSelectPage` (choice via per-option `onClick`; live-docs shape fetched 2026-07-13) before `requestPayment` when `charged >= 50,000원` (카드사 할부 floor; below it → straight to 일시불). Options: 일시불(`installment:0`) + 2~12개월 (no 1개월). Re-asked on every 다시 결제하기 (한도 초과 → switch-to-installments is the natural retry remedy). Selection back-arrow = terminal give-up (`session.abort` invalid post-`chargeContext`, §8); a first-prompt back-out sends `FAILED`/`USER_BACKED_OUT`.
+
+- 무이자: no SDK param exists (confirmed 2026-07-13); issuer/merchant contract decides at authorization. Display labels deferred pending business data.
+- **[BE, MUST DO]** `cancelParams.installment` = persisted `response.card.installment` ("원본 결제의 할부 개월") — else refunds of installment payments go out as 일시불. VAN behavior on mismatch undocumented → device-test.
+- **[BE]** C4 `IN_PROGRESS`→`EXPIRED` watchdog must budget selection-screen dwell (pre-first-attempt think time), in addition to failure-screen dwell.
+- **[MUST TEST]** installment approval end-to-end; `installment:N` + BARCODE/QR; `renderSelectPage.onBack` fires (example-only in docs); overlay transition (blank-WebView family); cancel of an installment approval with/without `cancelParams.installment`.
 
 ---
 
@@ -398,6 +407,7 @@ Mapping (BE assigns terminal state + `failureReason` on the BE→CRM echo):
 - **Stop** dispatching card payments to NICE.
 - **Add** receipt printing: on terminal `session.result (SUCCEEDED)`, print on the locally-connected CAT using `tossResponse` + `pointUseAmount`/`chargedSupplyValue`/`chargedTax`. The printable card field set is the full `response.card` (van/approvalNumber/timestamp/acquirer/issuer/cardType/installment/maskedCardNumber) relayed by BE (§6.1, C5 resolved); formal-slip validity (business no., legal 매출전표) folds into `[MUST TEST C2]`. `[MUST TEST T1]`
 - **Idempotent receipt-write:** write the receipt once, at SUCCEEDED. A late reconcile can deliver a second `session.result` for the same sessionId `[findings: Reconcile]`.
+- **[MUST CONFIRM — receipt card number]** In client mode the printable card number is **Toss's `maskedCardNumber` only** — Toss's VAN never returns the full PAN, and the NICE CAT (printer-only) no longer sees the card. Reader-mode slips printed NICE's own mask format, so the number *looks different* now ("이상하게 들어감", device feedback 2026-07-13). Masked PAN on a 매출전표 is standard/PCI-required; if the *format* is wrong, normalization of `maskedCardNumber` is **CRM-side**. Owner: CRM (+ business sign-off that Toss's mask format is acceptable).
 - Keep `session.create` / `session.abort` / observing `session.status` / booking off the terminal echo.
 
 ---
