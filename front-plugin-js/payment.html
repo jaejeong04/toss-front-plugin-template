@@ -347,7 +347,11 @@
                   pointUseAmount: 0,
                   chargedSupplyValue: supplyValue,
                   chargedTax: tax,
-                  tossResponse: buildFailedResponse(rejectErr),
+                  // Envelope truthing here too: with the reconcile gate widened
+                  // to hadRejectedAttempt, this branch is reachable with a
+                  // resolved CANCELED/TIMEOUT in hand — forward it; synthesize
+                  // FAILED only when there is truly no result (reject path).
+                  tossResponse: result || buildFailedResponse(rejectErr),
                 },
               });
               // KEEP pending: getPayment was inconclusive, a real charge may yet
