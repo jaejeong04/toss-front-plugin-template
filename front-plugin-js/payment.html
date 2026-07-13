@@ -230,20 +230,15 @@
         //    session.result (SUCCESS or FAILED) is sent only on success or the
         //    back-arrow give-up. Spec §6.5 (FAILED envelope); 기획 결제 실패 화면.
 
-        // Build the §6.5 FAILED failure envelope for give-up. Prefer a resolved
-        // result's reason, else the rejected error's code/message, else the
-        // result type, else a generic marker.
-        function buildFailedResponse(result, rejectErr) {
-          let reason;
-          if (result && result.response && result.response.reason) {
-            reason = result.response.reason;
-          } else if (rejectErr && (rejectErr.code || rejectErr.message)) {
-            reason = rejectErr.code || rejectErr.message;
-          } else if (result && result.type) {
-            reason = result.type; // CANCELED / TIMEOUT
-          } else {
-            reason = "PAYMENT_FAILED";
-          }
+        // Build the §6.5 FAILED envelope — reject path ONLY. A resolved
+        // CANCELED/TIMEOUT result is passed through unchanged by giveUp (the
+        // backend maps CANCELED→USER_CANCELED, TIMEOUT→EXPIRED); FAILED (→
+        // PAYMENT_DECLINED) is synthesized only when requestPayment rejected
+        // and there is no result object to forward.
+        function buildFailedResponse(rejectErr) {
+          const reason =
+            (rejectErr && (rejectErr.code || rejectErr.message)) ||
+            "PAYMENT_FAILED";
           return { type: "FAILED", response: { reason: String(reason) } };
         }
 
@@ -288,8 +283,10 @@
         }
 
         // Terminal give-up — customer tapped the back arrow on the failure
-        // screen. Sends the FAILED session.result so the CRM can process the
-        // failure. SAFETY: a REJECTED attempt may have charged on-device (bridge
+        // screen. Sends the terminal session.result so the CRM can process the
+        // outcome — the original CANCELED/TIMEOUT result passed through
+        // unchanged, or a synthesized FAILED for the reject path. SAFETY: a
+        // REJECTED attempt may have charged on-device (bridge
         // dropped after approval), so reconcile via getPayment first — a real
         // charge is reported as SUCCESS, never overwritten with FAILED. A
         // resolved CANCELED/TIMEOUT means no charge, so skip the lookup.
@@ -331,7 +328,7 @@
                   pointUseAmount: 0,
                   chargedSupplyValue: supplyValue,
                   chargedTax: tax,
-                  tossResponse: buildFailedResponse(result, rejectErr),
+                  tossResponse: buildFailedResponse(rejectErr),
                 },
               });
               // KEEP pending: getPayment was inconclusive, a real charge may yet
@@ -351,7 +348,9 @@
               pointUseAmount: 0,
               chargedSupplyValue: supplyValue,
               chargedTax: tax,
-              tossResponse: buildFailedResponse(result, rejectErr),
+              // Envelope truthing: forward the real result when we have one;
+              // synthesize FAILED only for the reject path.
+              tossResponse: result || buildFailedResponse(rejectErr),
             },
           });
           if (sent) {
