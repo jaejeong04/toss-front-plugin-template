@@ -508,7 +508,7 @@
           // a non-promise return must not make the bare .catch throw.
           Promise.resolve(sdk.template.renderSelectPage({
             title: "할부 개월수를 선택해주세요",
-            subtitle: "카드 결제 시 적용됩니다",
+            subtitle: "할부가 불가능한 경우 일시불을 선택해 주세요",
             options: monthOptions.map((opt) => ({
               title: opt.label,
               onClick: () => {
