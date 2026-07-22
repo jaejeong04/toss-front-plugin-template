@@ -34,7 +34,7 @@ Everything else in this document — the failure envelope, same-session retry se
 
 - On a card-payment failure (decline / user-cancel / timeout), the plugin shows an itemized failure screen with **다시 결제하기** and retries `requestPayment` **on the same `sessionId`**. During retries **nothing terminal is sent** — the session must stay `IN_PROGRESS`.
 - A terminal `session.result` is sent exactly once, on: **SUCCESS**, or **give-up** (back-arrow). Abandonment (customer walks away) sends nothing → your `EXPIRED` watchdog resolves it.
-- **할부 (superseded 2026-07-22 — see addendum):** the plugin sends no `installment` and shows no selection screen. The **firmware** prompts for 할부 on its 서명 screen above 50,000원, and the chosen 개월수 comes back on `response.card.installment` as before.
+- **할부 (superseded 2026-07-22 — see addendum):** the plugin sends no `installment` and shows no selection screen. The **firmware** prompts for 할부 on its 서명 screen once the amount reaches 50,000원 (`>= 50000`), and the chosen 개월수 comes back on `response.card.installment` as before.
 
 ## 2. Backend — required changes
 
