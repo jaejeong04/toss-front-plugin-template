@@ -41,11 +41,6 @@
       // (default 60s), so we ping to keep the socket alive during that window.
       const HEARTBEAT_MS = 20000;
 
-      // 할부 floor: Korean issuers decline installments under 50,000원, so the
-      // 할부 selection screen only shows at/above this amount (business
-      // decision 2026-07-13). Below it, payment proceeds as 일시불.
-      const INSTALLMENT_MIN_AMOUNT = 50000;
-
       // Helper: spec §6.2 mapTossFailureToKorean — maps a Toss non-success
       // result (or a synthesized FAILED envelope) to the 기획 취소 사유 labels:
       // 승인 거절 / 잔액 부족 / 한도 초과 / 통신 오류 / 시간 초과.
@@ -398,9 +393,9 @@
         // itemized summary; single cta 다시 결제하기 → retry (same session);
         // back arrow (onBack) → give up. Reuses the pre-Task-18 itemized layout.
         function renderFailureScreen(result, rejectErr) {
-          // Same staleness token as renderInstallmentScreen: a pre-interaction
-          // render rejection routes home; a post-interaction settle is a stale
-          // dismissal from this screen's own replacement — swallow it.
+          // Staleness token: a pre-interaction render rejection routes home; a
+          // post-interaction settle is a stale dismissal from this screen's own
+          // replacement — swallow it.
           let interacted = false;
           // Promise.resolve() wrapper: template calls are promise-returning per
           // docs, but if one ever returned undefined a bare .catch would throw
@@ -448,16 +443,12 @@
               text: "다시 결제하기",
               // Retry on the SAME session — no terminal result was sent, so the
               // backend session is still IN_PROGRESS and this re-attempt is valid.
-              // Re-ask 할부 on every retry (한도 초과 declines are fixed by
-              // switching to installments); below the 5만원 floor there is no
-              // 할부 to ask — straight back to the card UI.
+              // 할부 is re-offered by the firmware itself on every fresh
+              // requestPayment (서명 screen, ≥5만원), so a 한도 초과 decline is
+              // still remediable by switching to installments on retry.
               onClick: () => {
                 interacted = true;
-                if (charged >= INSTALLMENT_MIN_AMOUNT) {
-                  renderInstallmentScreen(result, rejectErr);
-                } else {
-                  attempt().catch(fatalToHome);
-                }
+                attempt().catch(fatalToHome);
               },
             },
             // Back arrow = give up: terminalize (envelope per §6.5) so the CRM
@@ -473,76 +464,6 @@
             } else {
               console.warn(
                 "[smartdoctor] renderOrderResultPage stale rejection (ignored)",
-                err,
-              );
-            }
-          });
-        }
-
-        // Chosen 할부 개월수 for this session's attempts. 0 = 일시불 (SDK
-        // default). Overwritten on every selection; attemptOnce reads it.
-        let installmentMonths = 0;
-
-        // 할부 selection — 기획 2026-07-13. renderSelectPage (Template API;
-        // live-docs shape 2026-07-13: title/subtitle required, choice delivered
-        // via per-option onClick, onBack shown in the doc's code example —
-        // [MUST TEST] that it fires on-device). Options: 일시불(0) + 2~12개월.
-        // No 1개월 — 1 == 일시불 in Korean card practice and installment:1 is
-        // undocumented. NOTE: payment method (CARD vs QR) is chosen on the
-        // firmware overlay AFTER requestPayment, so this is asked first; the
-        // subtitle scopes it to card payments. What installment:N does to a
-        // BARCODE payment is undocumented — [MUST TEST].
-        function renderInstallmentScreen(prevResult, prevRejectErr) {
-          const monthOptions = [{ label: "일시불", months: 0 }];
-          for (let m = 2; m <= 12; m++) {
-            monthOptions.push({ label: m + "개월", months: m });
-          }
-          // Staleness token (verify fix 2026-07-13): every legitimate teardown
-          // of THIS screen goes through its own callbacks, so interacted===true
-          // marks any later settle of this render promise as stale. The global
-          // attemptInFlight/terminalized flags can't do this — they both read
-          // false again during failure-screen dwell, and a stale rejection then
-          // would yank the customer home off a live IN_PROGRESS retry flow.
-          let interacted = false;
-          // Promise.resolve() wrapper: same defense as renderFailureScreen —
-          // a non-promise return must not make the bare .catch throw.
-          Promise.resolve(sdk.template.renderSelectPage({
-            title: "할부 개월수를 선택해주세요",
-            subtitle: "할부가 불가능한 경우 일시불을 선택해 주세요",
-            options: monthOptions.map((opt) => ({
-              title: opt.label,
-              onClick: () => {
-                interacted = true;
-                installmentMonths = opt.months;
-                attempt().catch(fatalToHome);
-              },
-            })),
-            // Back arrow = give up (terminal session.result). session.abort is
-            // invalid here — order.html already sent chargeContext, the session
-            // is IN_PROGRESS (abort is pre-chargeContext only, spec §8). On a
-            // first-prompt back-out no attempt has run, so synthesize a
-            // USER_BACKED_OUT reject reason; after a failed attempt, pass the
-            // real failure context through so the envelope stays truthful.
-            onBack: () => {
-              interacted = true;
-              const err =
-                !prevResult && !prevRejectErr
-                  ? { code: "USER_BACKED_OUT" }
-                  : prevRejectErr;
-              giveUp(prevResult, err).catch(fatalToHome);
-            },
-          })).catch((err) => {
-            // A render rejection BEFORE any interaction means the screen never
-            // engaged — without routing home the kiosk is stranded on a dead
-            // screen (panel fix 2026-07-13). Once interacted, any settle of
-            // this promise is a stale dismissal (the screen was legitimately
-            // replaced via its own callbacks) — swallow it, never yank the
-            // customer off a live retry flow.
-            if (!interacted && !terminalized) {
-              fatalToHome(err);
-            } else {
-              console.warn(
-                "[smartdoctor] renderSelectPage stale rejection (ignored)",
                 err,
               );
             }
@@ -600,7 +521,6 @@
               tax,
               supplyValue,
               tip: dispatch.amount.tip ?? 0,
-              installment: installmentMonths, // 0 = 일시불; set by 할부 screen
               timeoutMs: dispatch.timeoutMs ?? 60000,
               localeCode: "ko",
               excludePaymentTypes: ["CASH"], // spec §2.1 / §7: cash excluded
@@ -641,15 +561,7 @@
           renderFailureScreen(result, rejectErr);
         }
 
-        // Entry: ask 할부 first when the amount can carry it (5만원 floor);
-        // otherwise straight to the card UI as 일시불. The selection screen is
-        // fire-and-forget — attempt() is entered from its option onClick, so
-        // attemptInFlight is never held during customer think-time.
-        if (charged >= INSTALLMENT_MIN_AMOUNT) {
-          renderInstallmentScreen(null, null);
-        } else {
-          await attempt();
-        }
+        await attempt();
       }
 
       // ── CANCEL / REFUND FLOW ────────────────────────────────────────
