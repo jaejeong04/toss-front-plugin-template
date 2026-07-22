@@ -19,7 +19,7 @@ The 2026-07-13 device finding behind §1's 할부 bullet was **wrong**: the clie
 | Device test 4 (할부-screen back-arrow) | **Struck** — the screen no longer exists. |
 | Device test 6 (`installment: N` + QR/BARCODE) | **Struck** — the plugin no longer sends `installment`. |
 | Device test 2 (6만원 + 3개월 end-to-end) | **Still required, re-owned:** the 3개월 is now chosen on the firmware 서명 screen. Must still echo `response.card.installment === 3`. |
-| §2.4 `cancelParams.installment` ← MUST DO | **Unchanged and still required.** |
+| §2.4 `cancelParams.installment` ← MUST DO | **Unchanged, still required — and its trigger is no longer gated on a plugin feature.** The firmware produces non-zero installments on its own, so this may already be live rather than pending. Verify per [`verify-crm-backend-2026-07-22.md`](verify-crm-backend-2026-07-22.md) V1 + §3 data check. |
 | §3 `HALBU` / `InstallmentPayMonth` | **Unchanged and still required.** |
 
 **New device test (FE + device):** confirm that omitting `installment` still shows the firmware 할부 row at ≥5만원 and not below. **This is ship-blocking:** if it fails, 할부 is impossible at the kiosk with no plugin fallback.
