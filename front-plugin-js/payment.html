@@ -476,7 +476,7 @@
         // gates every invocation (initial call + cta re-invocations).
         let attemptInFlight = false;
         // Terminal latch (panel fix, 2026-07-13): set by giveUp/finishSuccess/
-        // the backend-error bails. Blocks any late attempt() (e.g. an option
+        // the backend-error bails. Blocks any late attempt() (e.g. a 다시 결제하기
         // tap racing a back-arrow giveUp's async getPayment gap) and any second
         // terminal send. Referenced by giveUp above — safe: all callbacks fire
         // only after runPayment's body (incl. this declaration) has executed.

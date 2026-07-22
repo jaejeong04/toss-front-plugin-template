@@ -66,6 +66,8 @@ Note the asymmetry that must survive: `order.html`'s `USER_BACKED_OUT` is a
 stage. It keeps working. The addendum must say this explicitly or BE will read
 "USER_BACKED_OUT retired" too broadly.
 
+**Correction (final review, 2026-07-22):** the envelope is *not* the only thing lost. The deleted screen used `renderSelectPage`, whose `onBack` is **documented**; the surviving failure screen uses `renderOrderResultPage`, whose `onBack` the frontend spec lists as a `[GAP]`. Because the 할부 screen re-appeared on every retry cycle, ≥5만원 payments previously always had a documented give-up surface, and now they have only the undocumented one. No code change follows from this — §6.5 already carried the `[GAP]` and the `EXPIRED` fallback — but the risk posture changed, and it is now tracked as a ship-blocking device test in §6.6 and as row 8 of the handoff test matrix.
+
 ### D3 — retry re-asks nothing
 
 The failure screen's `다시 결제하기` currently branches on
