@@ -208,7 +208,20 @@ Run:
 grep -n 'installment\|할부\|INSTALLMENT' front-plugin-js/payment.html
 ```
 
-Expected: **no output** (exit status 1). If anything matches, a site was missed.
+Expected: **exactly two lines** — the explanatory comment lines inside `renderFailureScreen`'s cta added by Step 4:
+
+```
+// 할부 is re-offered by the firmware itself on every fresh
+// still remediable by switching to installments on retry.
+```
+
+Those two are intentional: they document *why* retry no longer re-asks, which is the single most likely thing for a future reader to get wrong. **Any other match means a site was missed** — in particular there must be no match for `INSTALLMENT_MIN_AMOUNT`, `installmentMonths`, or `renderInstallmentScreen`. Verify that separately:
+
+```bash
+grep -n 'INSTALLMENT_MIN_AMOUNT\|installmentMonths\|renderInstallmentScreen\|renderSelectPage' front-plugin-js/payment.html
+```
+
+Expected: no output (exit status 1).
 
 - [ ] **Step 9: Verify the file still parses**
 

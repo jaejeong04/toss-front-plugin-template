@@ -110,8 +110,11 @@ All six sites are inside `runPayment`. Line numbers are pre-change.
 | 5 | L603 | Delete the `installment: installmentMonths,` line from the `requestPayment` argument object (D1) |
 | 6 | L644–652 | Entry becomes an unconditional `await attempt();`; comment rewritten |
 
-**Post-condition:** `grep -n 'installment\|할부\|INSTALLMENT' front-plugin-js/payment.html`
-returns nothing.
+**Post-condition:**
+`grep -n 'INSTALLMENT_MIN_AMOUNT\|installmentMonths\|renderInstallmentScreen\|renderSelectPage' front-plugin-js/payment.html`
+returns nothing. A broader `installment\|할부` grep still matches the two
+explanatory comment lines added at site 3 — those are intentional (they document
+why retry no longer re-asks) and are the only permitted residue.
 
 **Non-obvious hazard at site 6.** The current entry point is deliberately
 *fire-and-forget* for the 할부 path — `renderInstallmentScreen(null, null)` is
