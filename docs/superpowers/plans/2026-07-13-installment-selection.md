@@ -1,5 +1,23 @@
 # 할부 Selection Screen + Envelope Truthing Implementation Plan
 
+> ## ⛔ SUPERSEDED 2026-07-22 — do not implement the 할부 screen from this plan
+>
+> The premise below is **wrong**. The client-mode firmware **does** prompt for
+> 할부, on its own 서명 (signature) screen, once the charged amount reaches
+> 50,000원. The selection screen this plan builds was implemented (`6c0c968`,
+> hardened across `56ffbe4`/`179cc84`/`ab12ba4`) and then **removed** as
+> redundant (`4ff13c6`).
+>
+> - Current design: [`docs/toss-client-mode-flow.md`](../../toss-client-mode-flow.md) §6.6
+> - Removal spec: [`2026-07-22-installment-strip-design.md`](../specs/2026-07-22-installment-strip-design.md)
+> - Removal plan: [`2026-07-22-installment-strip.md`](2026-07-22-installment-strip.md)
+>
+> **Still valid — Task 1 only.** This plan bolted two unrelated things together.
+> Task 1 (§6.5 give-up envelope truthing) shipped as `63df62f`, is live, and is
+> load-bearing: it is why a resolved `CANCELED`/`TIMEOUT` give-up reaches the
+> backend with its true type instead of being relabeled `FAILED`. Only Tasks 2–3
+> (the 할부 screen and its docs) were withdrawn.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a Toss-template 할부(installment) 개월수 selection screen to the card path (device test 2026-07-13 confirmed the firmware does NOT prompt), feed the choice into `requestPayment`'s `installment` param, and fix the give-up envelope so `TIMEOUT`/`CANCELED` give-ups reach the backend with their true type instead of being relabeled `FAILED`.
