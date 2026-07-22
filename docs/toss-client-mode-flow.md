@@ -325,22 +325,30 @@ Mapping (BE assigns terminal state + `failureReason` on the BE→CRM echo):
 |---|---|---|
 | `CANCELED` (user canceled / card declined?) | `CANCELED` | `USER_CANCELED` |
 | `TIMEOUT` | `EXPIRED` | `EXPIRED` |
-| `FAILED`, `response.reason === "USER_BACKED_OUT"` (back-out before any attempt — 할부 screen back-arrow, §6.6) | `CANCELED` | `USER_CANCELED` — **not** a card decline |
+| ~~`FAILED`, `response.reason === "USER_BACKED_OUT"`~~ — **RETIRED 2026-07-22.** Its only producer was the plugin 할부 screen's back-arrow; with that screen removed (§6.6) no plugin-owned screen sits between `chargeContext` and `requestPayment`, so the payment page never emits this. `order.html`'s `session.abort(USER_BACKED_OUT)` on the 메디캐시 page is a **different** message at a **different** stage and is unaffected. | ~~`CANCELED`~~ | ~~`USER_CANCELED`~~ |
 | `FAILED`, any other reason (hard decline / insufficient funds / `requestPayment` reject) | `CANCELED` (or new `FAILED`) | `PAYMENT_DECLINED` (carry `reason` through) |
 
 - **⚠️ Hard-decline representation is undocumented.** Toss lists no `FAILED` type, so a VAN reject / insufficient-funds decline likely surfaces as `CANCELED` (or a rejected Promise). **Confirm on device** which — ties to [MUST TEST T2]. The plugin must wrap `requestPayment` in `try/catch` in case a hard failure **rejects** rather than resolves.
 - **No medicash deduction** on any non-success (`RCPT_INFO.DC_AMT` untouched).
-- **Same-session retry (2026-07-13):** on a non-success attempt the plugin sends **nothing terminal** and renders the itemized failure screen (`renderOrderResultPage type:"cancelled"`, cta `다시 결제하기`). The session stays `IN_PROGRESS`; `[다시 결제하기]` re-calls `requestPayment` on the **same `sessionId`**. A terminal `session.result` fires only on `SUCCESS` or the back-arrow give-up — the give-up envelope forwards a resolved `CANCELED`/`TIMEOUT` **unchanged** (mapping per the table above); `FAILED` is synthesized only for the reject path (no result object), incl. `USER_BACKED_OUT` for a back-out before any attempt. An abandoned failure screen resolves via `EXPIRED`. Give-up after a *rejected* attempt reconciles via `getPayment` first (a real charge is reported `SUCCESS`, never overwritten with `FAILED`). **Depends on:** paymentKey-reuse [MUST TEST], `getPayment` on-device [MUST TEST T3], `renderOrderResultPage.onBack` [GAP], and BE handling `FAILED`→late-`SUCCESS` (§6.4 idempotency). Supersedes the prior "retry requires a fresh CRM session.create."
+- **Same-session retry (2026-07-13):** on a non-success attempt the plugin sends **nothing terminal** and renders the itemized failure screen (`renderOrderResultPage type:"cancelled"`, cta `다시 결제하기`). The session stays `IN_PROGRESS`; `[다시 결제하기]` re-calls `requestPayment` on the **same `sessionId`**. A terminal `session.result` fires only on `SUCCESS` or the back-arrow give-up — the give-up envelope forwards a resolved `CANCELED`/`TIMEOUT` **unchanged** (mapping per the table above); `FAILED` is synthesized only for the reject path (no result object). An abandoned failure screen resolves via `EXPIRED`. Give-up after a *rejected* attempt reconciles via `getPayment` first (a real charge is reported `SUCCESS`, never overwritten with `FAILED`). **Depends on:** paymentKey-reuse [MUST TEST], `getPayment` on-device [MUST TEST T3], `renderOrderResultPage.onBack` [GAP], and BE handling `FAILED`→late-`SUCCESS` (§6.4 idempotency). Supersedes the prior "retry requires a fresh CRM session.create."
 - **CRM prints no card receipt** on non-success.
 
-### 6.6 할부 (installment) selection — plugin-owned (2026-07-13)
+### 6.6 할부 (installment) selection — firmware-owned (corrected 2026-07-22)
 
-Device test 2026-07-13: the client-mode firmware payment UI does **not** prompt for 할부 — the plugin owns selection. `payment.html` renders `sdk.template.renderSelectPage` (choice via per-option `onClick`; live-docs shape fetched 2026-07-13) before `requestPayment` when `charged >= 50,000원` (카드사 할부 floor; below it → straight to 일시불). Options: 일시불(`installment:0`) + 2~12개월 (no 1개월). Re-asked on every 다시 결제하기 (한도 초과 → switch-to-installments is the natural retry remedy). Selection back-arrow = terminal give-up (`session.abort` invalid post-`chargeContext`, §8); a first-prompt back-out sends `FAILED`/`USER_BACKED_OUT`.
+**Correction.** The 2026-07-13 entry here recorded that the client-mode firmware payment UI does **not** prompt for 할부, and the plugin grew its own `sdk.template.renderSelectPage` 개월수 screen on that basis. **That finding was wrong.** Device observation 2026-07-22: the firmware prompts on the **서명 (signature)** screen — a `할부 … 일시불 >` row that opens the module's own 개월수 picker — and the row appears automatically once the charged amount exceeds 50,000원. The plugin screen asked the same question one screen earlier and the firmware asked again regardless, so it has been **removed**. `payment.html` now calls `requestPayment` with **no `installment` param** (SDK default `0`) and the module owns selection end to end.
 
-- 무이자: no SDK param exists (confirmed 2026-07-13); issuer/merchant contract decides at authorization. Display labels deferred pending business data.
+Consequences of the removal:
+
+- The plugin no longer has any screen between `chargeContext` and `requestPayment`. The `FAILED`/`USER_BACKED_OUT` envelope had no other producer and is **retired** (§6.5).
+- Retry (`다시 결제하기`) goes straight back to `requestPayment`; the firmware re-prompts for 할부 on each fresh call, so switching to installments remains the natural remedy for a 한도 초과 decline.
+
+Unchanged obligations — firmware-owned selection makes non-zero `response.card.installment` values **more** likely, not less:
+
+- 무이자: no SDK param exists (confirmed 2026-07-13); the issuer/merchant contract decides at authorization.
 - **[BE, MUST DO]** `cancelParams.installment` = persisted `response.card.installment` ("원본 결제의 할부 개월") — else refunds of installment payments go out as 일시불. VAN behavior on mismatch undocumented → device-test.
-- **[BE]** C4 `IN_PROGRESS`→`EXPIRED` watchdog must budget selection-screen dwell (pre-first-attempt think time), in addition to failure-screen dwell.
-- **[MUST TEST]** installment approval end-to-end; `installment:N` + BARCODE/QR; `renderSelectPage.onBack` fires (example-only in docs); overlay transition (blank-WebView family); cancel of an installment approval with/without `cancelParams.installment`.
+- **[CRM]** `HALBU`/`InstallmentPayMonth` ← `response.card.installment`.
+- **[BE]** C4 `IN_PROGRESS`→`EXPIRED` watchdog: 할부 dwell is now **inside** the firmware's own `timeoutMs` window rather than separate pre-attempt plugin think-time. Failure-screen dwell and N retries still apply.
+- **[MUST TEST]** (1) omitting `installment` still shows the firmware 할부 row at ≥5만원 and not below; (2) a 3개월 selection echoes back as `response.card.installment === 3`; (3) installment approval end-to-end; (4) cancel of an installment approval with vs. without `cancelParams.installment`; (5) overlay transition (blank-WebView family).
 
 ---
 
@@ -420,7 +428,7 @@ Device test 2026-07-13: the client-mode firmware payment UI does **not** prompt 
 | Plugin offline at create | 10s grace → `FAILED / DEVICE_OFFLINE` | `[REUSE §3]` |
 | Dispatched, no claim in 30s | `FAILED / PLUGIN_UNRESPONSIVE` | `[REUSE §9]` |
 | `IN_PROGRESS`, no result | `EXPIRED` after `timeoutMs + 30s` (see §9 timeout note; needs `timeoutMs` re-added to dispatch) | `[REUSE §9]` |
-| Card declined / `requestPayment` `CANCELED`/`TIMEOUT`/reject | plugin renders the itemized failure screen (`renderOrderResultPage type:"cancelled"`, cta `다시 결제하기`) and sends **nothing terminal** — session stays `IN_PROGRESS` for same-session retry (할부 re-asked per §6.6); terminal `session.result` only on `SUCCESS` or give-up (envelope per §6.5); **no** medicash deduction on non-success | §6.5, §6.6 |
+| Card declined / `requestPayment` `CANCELED`/`TIMEOUT`/reject | plugin renders the itemized failure screen (`renderOrderResultPage type:"cancelled"`, cta `다시 결제하기`) and sends **nothing terminal** — session stays `IN_PROGRESS` for same-session retry; terminal `session.result` only on `SUCCESS` or give-up (envelope per §6.5); **no** medicash deduction on non-success | §6.5, §6.6 |
 | CRM abort in CREATED/DISPATCHED | `session.abort` → CANCELED (plugin navigates home if dispatched) | `[REUSE §7]` |
 | User backs out during 메디캐시 UI (pre-chargeContext) | `session.abort (USER_BACKED_OUT)` → CANCELED | `[REUSE §8]` |
 | Abort **during** `requestPayment` (card entry) | firmware payment UI owns the moment; abort via `requestPayment` cancel/timeout semantics, not a WS abort | `[MUST TEST T2]` |
