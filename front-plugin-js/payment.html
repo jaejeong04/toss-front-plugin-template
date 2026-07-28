@@ -41,22 +41,68 @@
       // (default 60s), so we ping to keep the socket alive during that window.
       const HEARTBEAT_MS = 20000;
 
+      // Keep an unmapped raw code short enough not to blow the summary row.
+      // Slice by code point, not UTF-16 unit: this may be free-form err.message
+      // text from an undocumented bridge, and cutting a surrogate pair in half
+      // would hand a lone surrogate to the native template renderer.
+      function truncateReasonCode(reason) {
+        const chars = Array.from(reason);
+        return chars.length > 40 ? `${chars.slice(0, 40).join("")}…` : reason;
+      }
+
       // Helper: spec §6.2 mapTossFailureToKorean — maps a Toss non-success
       // result (or a synthesized FAILED envelope) to the 기획 취소 사유 labels:
-      // 승인 거절 / 잔액 부족 / 한도 초과 / 통신 오류 / 시간 초과.
-      function mapTossFailureToKorean(result) {
-        if (!result) return "통신 오류";
-        // Reason-string mapping. [MUST TEST]: real Toss reason codes are
-        // undocumented — verify the actual strings on-device and adjust.
-        const reason = (result.response && result.response.reason) || "";
+      // 승인 거절 / 잔액 부족 / 한도 초과 / 통신 오류 / 시간 초과, plus a neutral
+      // 결제 실패 for anything we cannot identify.
+      //
+      // Takes BOTH the resolved result AND the reject error. A hard decline
+      // (잔액 부족 / 한도 초과 / 승인 거절) is not in the documented resolve enum
+      // — Toss documents only SUCCESS | CANCELED | TIMEOUT — so it almost
+      // certainly arrives as a rejection instead. The previous signature took
+      // only `result` and short-circuited on `if (!result) return "통신 오류"`,
+      // which collapsed EVERY reject, real declines included, into 통신 오류 on
+      // screen, while buildFailedResponse was forwarding the real code to the
+      // backend. Screen and envelope disagreed; that mismatch was the bug.
+      function mapTossFailureToKorean(result, rejectErr) {
+        // Same precedence buildFailedResponse uses (code before message), so
+        // the screen and the §6.5 envelope report the same string.
+        // [MUST TEST]: real Toss reason codes are still undocumented — capture
+        // an actual on-device decline and tighten these patterns.
+        // rejectErr's shape is undocumented: it may be an Error, a plain object,
+        // or a bare string/number rejected straight out of the bridge. Read the
+        // object fields when they exist; otherwise take the rejection itself —
+        // a bare "INSUFFICIENT_BALANCE" string carries the answer and must not
+        // be dropped. Never String() a bare object: that would print
+        // "[object Object]" onto a paying customer's screen.
+        const rejectReason =
+          rejectErr == null
+            ? ""
+            : typeof rejectErr === "object"
+              ? rejectErr.code || rejectErr.message || ""
+              : rejectErr;
+        const reason = String(
+          (result && result.response && result.response.reason) ||
+            rejectReason ||
+            "",
+        );
+        // 통신 first: a NETWORK_TIMEOUT / CONNECTION_* code is a comms failure,
+        // not the 60s user-inactivity 시간 초과 that result.type TIMEOUT means.
+        if (/NETWORK|OFFLINE|CONNECT|통신/i.test(reason)) return "통신 오류";
         if (/INSUFFICIENT|BALANCE|잔액/i.test(reason)) return "잔액 부족";
         if (/LIMIT|EXCEED|한도/i.test(reason)) return "한도 초과";
         if (/DECLIN|REJECT|승인/i.test(reason)) return "승인 거절";
         if (/TIMEOUT|시간/i.test(reason)) return "시간 초과";
-        if (result.type === "TIMEOUT") return "시간 초과";
-        if (result.type === "CANCELED") return "승인 거절";
-        if (result.type === "FAILED") return "승인 거절";
-        return "통신 오류";
+        // No usable reason string — fall back to the documented resolve enum.
+        if (result) {
+          if (result.type === "TIMEOUT") return "시간 초과";
+          if (result.type === "CANCELED") return "승인 거절";
+          if (result.type === "FAILED") return "승인 거절";
+        }
+        // Unknown. Deliberately NOT 통신 오류 — naming the wrong cause sends the
+        // store chasing a network problem that isn't there. Carry the raw Toss
+        // string so the on-device test (and later, store CS) can read what
+        // actually came back.
+        return reason ? `결제 실패 (${truncateReasonCode(reason)})` : "결제 실패";
       }
 
       // Helper: spec §6.2 mapPaymentMethodToKorean. Null-safe: the reject path
@@ -423,7 +469,10 @@
                     : []),
                   {
                     label: "취소 사유",
-                    value: mapTossFailureToKorean(result),
+                    // rejectErr matters here: on the reject path `result` is
+                    // null and the error object is the ONLY carrier of the
+                    // real decline reason.
+                    value: mapTossFailureToKorean(result, rejectErr),
                     theme: "red",
                   },
                   {
@@ -528,7 +577,16 @@
           } catch (err) {
             rejectErr = err;
             hadRejectedAttempt = true; // may hide a completed charge — see decl
-            console.error("[smartdoctor] requestPayment failed", err);
+            // Spell the fields out rather than logging only the object: Toss's
+            // reject shape is undocumented, and this log is the second channel
+            // (after the on-screen raw code) for pinning down the real decline
+            // codes during on-device testing. [MUST TEST]
+            console.error(
+              "[smartdoctor] requestPayment failed",
+              "code=", err && err.code,
+              "message=", err && err.message,
+              "raw=", err,
+            );
           }
 
           // CRITICAL ordering (panel fix 2026-07-13): a real charge outranks a
